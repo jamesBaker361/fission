@@ -15,7 +15,7 @@
 
 #SBATCH --mem=64000                # Real memory (RAM) required (MB)
 
-#SBATCH --time=3-00:00:00           # Total run time limit (D-HH:MM:SS)
+
 
 #SBATCH --output=slurm_chip/generic/%j.out  # STDOUT output file
 

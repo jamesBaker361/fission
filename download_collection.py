@@ -6,6 +6,7 @@
 #
 import sys,json,requests
 import getopt
+import os
 
 if sys.version_info[0] < 3:
     raise Exception("Python 3 or greater is required. Try running `python3 download_collection.py`")
@@ -50,6 +51,9 @@ next_url = '/models?page={}&per_page=100&q=collections:{}'.format(page,collectio
 # Path to download a single model in the collection
 download_url = base_url + fuel_version + '/{}/models/'.format(owner_name)
 
+dest_dir="google"
+os.makedirs(dest_dir,exist_ok=True)
+
 # Iterate over the pages
 while True:
     url = base_url + fuel_version + next_url
@@ -73,7 +77,8 @@ while True:
         model_name = model['name']
         print ('Downloading (%d) %s' % (count, model_name))
         download = requests.get(download_url+model_name+'.zip', stream=True)
-        with open(model_name+'.zip', 'wb') as fd:
+        path=os.path.join(dest_dir,model_name+'.zip')
+        with open(path, 'wb') as fd:
             for chunk in download.iter_content(chunk_size=1024*1024):
                 fd.write(chunk)
 

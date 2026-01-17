@@ -12,3 +12,4 @@ for zf in files:
     with zipfile.ZipFile(os.path.join(src_dir,zf), 'r') as zip_ref:
         zip_ref.extractall(dest_path)
     print("done!")
+    

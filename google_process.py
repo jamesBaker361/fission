@@ -6,8 +6,7 @@ import shutil
 
 bpy.app.binary_path=os.path.join("blend","blender-5.0.1-linux-x64","blender")
 src_dir="google"
-files=[file for file in os.listdir(src_dir) if os.path.isdir(os.path.join(src_dir,file))]
-print(files)
+
 
 '''for zf in files:
     print(f"processing {zf}...",end="")
@@ -18,9 +17,10 @@ print(files)
         zip_ref.extractall(dest_path)
     print("done!")'''
     
+files=[file for file in os.listdir(src_dir) if os.path.isdir(os.path.join(src_dir,file))]
+print(files)
 
 OUT_DIR = "renders"
-os.makedirs(OUT_DIR)
 
 NUM_VIEWS = 5
 RADIUS = 2.0
@@ -29,11 +29,15 @@ ELEVATION = math.radians(30)
 IMAGE_RES = 256
 ENGINE = "CYCLES"  # or "BLENDER_EEVEE"
     
-for file in files:
+for f,file in enumerate(files):
     subfolders=os.listdir(os.path.join(src_dir,file))
     print(subfolders)
-    bpy.ops.wm.read_factory_settings(use_empty=True)
-    shutil.copy(os.path.join(src_dir,file,"materials","texture.png"), os.path.join(src_dir,file,"materials","texture.png"))
+    bpy.ops.wm.read_factory_settings()
+    if "Cube" in bpy.data.meshes:
+        mesh = bpy.data.meshes["Cube"]
+        print("removing mesh", mesh)
+        bpy.data.meshes.remove(mesh)
+    shutil.copy(os.path.join(src_dir,file,"materials","textures","texture.png"), os.path.join(src_dir,file,"meshes","texture.png"))
     bpy.ops.wm.obj_import(filepath=os.path.join(src_dir,file,"meshes","model.obj"),)
     obj = bpy.context.selected_objects[0]
     bpy.context.view_layer.objects.active = obj
@@ -61,11 +65,34 @@ for file in files:
     # -----------------------
     # LIGHTING
     # -----------------------
-    light_data = bpy.data.lights.new("KeyLight", type="AREA")
-    light_data.energy = 1000
+    '''light_data = bpy.data.lights.new("KeyLight", type="AREA")
+    light_data.energy = 500
     light = bpy.data.objects.new("KeyLight", light_data)
     light.location = (2, 2, 2)
     bpy.context.collection.objects.link(light)
+    
+    light_data = bpy.data.lights.new("KeyLight2", type="AREA")
+    light_data.energy = 500
+    light = bpy.data.objects.new("KeyLight2", light_data)
+    light.location = (-2, -2, 2)'''
+    
+    world = bpy.context.scene.world
+    if world is None:
+        world = bpy.data.worlds.new("World")
+        bpy.context.scene.world = world
+
+    world.use_nodes = True
+    nodes = world.node_tree.nodes
+    links = world.node_tree.links
+
+    nodes.clear()
+
+    bg = nodes.new(type="ShaderNodeBackground")
+    bg.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)  # RGB + Alpha
+    bg.inputs["Strength"].default_value = 0.5              # Ambient intensity
+
+    out = nodes.new(type="ShaderNodeOutputWorld")
+    links.new(bg.outputs["Background"], out.inputs["Surface"])
 
     # -----------------------
     # RENDER SETTINGS
@@ -100,9 +127,10 @@ for file in files:
             angle + math.pi / 2
         )
 
-        scene.render.filepath = os.path.join(OUT_DIR, f"view_{i:03d}.png")
+        scene.render.filepath = os.path.join(OUT_DIR, f"view_{f:03d}.png")
         bpy.ops.render.render(write_still=True)
 
     print("Done")
-    break
+    if f>3:
+        break
         

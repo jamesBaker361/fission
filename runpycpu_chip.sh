@@ -30,6 +30,7 @@ module purge
 #module load cudnn/7.0.3
 module load   Autoconf/2.72-GCCcore-13.3.0 
 module load  CMake/3.29.3-GCCcore-13.3.0
+module load git/2.33.1
 
 gcc --version
 eval "$(conda shell.bash hook)"

@@ -21,7 +21,7 @@ src_dir="google"
 files=[file for file in os.listdir(src_dir) if os.path.isdir(os.path.join(src_dir,file))]
 print(files)
 
-OUT_DIR = "renders"
+OUT_DIR = "google_renders"
 
 os.makedirs(OUT_DIR,exist_ok=True)
 

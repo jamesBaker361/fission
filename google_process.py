@@ -25,12 +25,13 @@ OUT_DIR = "renders"
 
 os.makedirs(OUT_DIR,exist_ok=True)
 
-NUM_VIEWS = 24
-NUM_VIEWS_Z=6
+NUM_VIEWS = 8
+NUM_VIEWS_Z=4
+NUM_VIEWS_RANDOM=20
 RADIUS = 2.0
 ELEVATION = math.radians(30)
 
-IMAGE_RES = 256
+IMAGE_RES = 512
 ENGINE = "CYCLES"  # or "BLENDER_EEVEE"
 CSV_PATH=os.path.join(OUT_DIR,"metadata.csv")
 with open(CSV_PATH,"w") as csv_file:
@@ -47,4 +48,7 @@ for f,file in enumerate(files):
         bpy.data.meshes.remove(mesh)
     shutil.copy(os.path.join(src_dir,file,"materials","textures","texture.png"), os.path.join(src_dir,file,"meshes","texture.png"))
     bpy.ops.wm.obj_import(filepath=os.path.join(src_dir,file,"meshes","model.obj"),)
-    count=render_obj()
+    count=render_obj(
+        OUT_DIR,ENGINE,IMAGE_RES,NUM_VIEWS,RADIUS,NUM_VIEWS_Z,NUM_VIEWS_RANDOM,CSV_PATH,file,"first",count
+    )
+    exit(0)

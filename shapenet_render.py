@@ -66,7 +66,9 @@ for file in files:
                 bpy.ops.wm.obj_import(filepath=model_path)
                 print("subsusdir path" , model_path)
                 count=render_obj(
-                    OUT_DIR,ENGINE,IMAGE_RES,NUM_VIEWS,RADIUS,NUM_VIEWS_Z, CSV_PATH,file,subsubdir,count,
+                    OUT_DIR,ENGINE,IMAGE_RES,NUM_VIEWS,RADIUS,NUM_VIEWS_Z, 
+                    NUM_VIEWS_RANDOM,
+                    CSV_PATH,file,subsubdir,count,
                 )
                 print("images ",count)
                 

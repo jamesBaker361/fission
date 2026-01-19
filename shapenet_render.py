@@ -40,7 +40,7 @@ os.makedirs(OUT_DIR,exist_ok=True)
 
 NUM_VIEWS = 8
 NUM_VIEWS_Z=4
-NUM_VIEWS_RANDOM=12
+NUM_VIEWS_RANDOM=20
 RADIUS = 2.0
 ELEVATION = math.radians(30)
 

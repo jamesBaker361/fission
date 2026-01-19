@@ -15,7 +15,7 @@
 
 #SBATCH --mem=64000                # Real memory (RAM) required (MB)
 
-
+#SBATCH --qos=long
 
 #SBATCH --output=slurm_chip/generic/%j.out  # STDOUT output file
 

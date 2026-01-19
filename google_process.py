@@ -19,7 +19,7 @@ src_dir="google"
     print("done!")'''
     
 files=[file for file in os.listdir(src_dir) if os.path.isdir(os.path.join(src_dir,file))]
-print(files)
+print(len(files),files)
 
 OUT_DIR = "google_renders"
 

@@ -51,4 +51,3 @@ for f,file in enumerate(files):
     count=render_obj(
         OUT_DIR,ENGINE,IMAGE_RES,NUM_VIEWS,RADIUS,NUM_VIEWS_Z,NUM_VIEWS_RANDOM,CSV_PATH,file,"first",count
     )
-    exit(0)

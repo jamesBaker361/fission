@@ -36,17 +36,21 @@ for zf in files:
     print("done!")'''
     
 OUT_DIR = "scale_renders"
+os.makedirs(OUT_DIR,exist_ok=True)
 
-NUM_VIEWS = 5
-NUM_VIEWS_Z=3
+NUM_VIEWS = 12
+NUM_VIEWS_Z=5
 RADIUS = 2.0
 ELEVATION = math.radians(30)
 
 IMAGE_RES = 256
 ENGINE = "CYCLES"  # or "BLENDER_EEVEE"
-
-count=0
+CSV_PATH=os.path.join(OUT_DIR,"metadata.csv")
+with open(CSV_PATH,"w") as csv_file:
+    csv_file.write(f"file_path,category,instance,location,rotation\n")
     
+count=0
+
 files=[file for file in os.listdir(src_dir) if os.path.isdir(os.path.join(src_dir,file))]
 for file in files:
     for subdir in os.listdir(os.path.join(src_dir,file)):
@@ -61,7 +65,8 @@ for file in files:
                 bpy.ops.wm.obj_import(filepath=model_path)
                 print("subsusdir path" , model_path)
                 count=render_obj(
-                    OUT_DIR,ENGINE,IMAGE_RES,NUM_VIEWS,RADIUS,ELEVATION,NUM_VIEWS_Z,count
+                    OUT_DIR,ENGINE,IMAGE_RES,NUM_VIEWS,RADIUS,NUM_VIEWS_Z, CSV_PATH,file,subsubdir,count,
                 )
                 print("images ",count)
                 
+                exit(0)

@@ -8,8 +8,10 @@ def render_obj(
     image_res,
     num_views,
     radius,
-    elevation,
     num_views_z,
+    csv_path,
+    category,
+    instance,
     count
 ):
     obj = bpy.context.selected_objects[0]
@@ -84,22 +86,29 @@ def render_obj(
     # -----------------------
     for i in range(num_views):
         for z in range(num_views_z):
-            angle = 2 * math.pi * i / num_views
-            z_angle=math.pi*z/num_views_z
+            azimuth = 2 * math.pi * i / num_views
+            polar = math.pi * (z + 0.5) / num_views_z  # avoid poles
 
-            cam_x = radius * math.cos(angle)
-            cam_y = radius * math.sin(angle)
-            cam_z = radius * math.sin(z_angle)
+            cam_x = radius * math.sin(polar) * math.cos(azimuth)
+            cam_y = radius * math.sin(polar) * math.sin(azimuth)
+            cam_z = radius * math.cos(polar)
 
             camera.location = (cam_x, cam_y, cam_z)
-            camera.rotation_euler = (
-                math.radians(90) - z_angle,
-                0,
-                angle + math.pi / 2
-            )
 
-            scene.render.filepath = os.path.join(out_dir, f"view_{count:03d}.png")
+            # Look at origin
+            direction = obj.location - camera.location
+            camera.rotation_euler = direction.to_track_quat('-Z', 'Y').to_euler()
+            path=os.path.join(
+                out_dir, f"view_{count:03d}.png"
+            )
+            scene.render.filepath = path
             bpy.ops.render.render(write_still=True)
-        
-            count+=1
+
+            count += 1
+            rotation=f"{radius * math.sin(polar) * math.cos(azimuth)}_{radius * math.sin(polar) * math.sin(azimuth)}_{radius * math.cos(polar)}"
+            location=f"{cam_x}_{cam_y}_{cam_z}"
+            
+            with open(csv_path,"a") as csv_file:
+                csv_file.write(f"{path},{category},{instance},{location},{rotation}\n")
+                print(f"wrote {path},{category},{instance},{location},{rotation} to {csv_path}")
     return count

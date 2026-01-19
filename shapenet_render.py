@@ -38,13 +38,13 @@ for zf in files:
 OUT_DIR = "scale_renders"
 os.makedirs(OUT_DIR,exist_ok=True)
 
-NUM_VIEWS = 2
-NUM_VIEWS_Z=2
-NUM_VIEWS_RANDOM=10
+NUM_VIEWS = 8
+NUM_VIEWS_Z=4
+NUM_VIEWS_RANDOM=12
 RADIUS = 2.0
 ELEVATION = math.radians(30)
 
-IMAGE_RES = 256
+IMAGE_RES = 512
 ENGINE = "CYCLES"  # or "BLENDER_EEVEE"
 CSV_PATH=os.path.join(OUT_DIR,"metadata.csv")
 with open(CSV_PATH,"w") as csv_file:

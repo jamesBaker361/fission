@@ -71,5 +71,3 @@ for file in files:
                     CSV_PATH,file,subsubdir,count,
                 )
                 print("images ",count)
-                
-                exit(0)

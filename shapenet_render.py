@@ -38,8 +38,9 @@ for zf in files:
 OUT_DIR = "scale_renders"
 os.makedirs(OUT_DIR,exist_ok=True)
 
-NUM_VIEWS = 12
-NUM_VIEWS_Z=5
+NUM_VIEWS = 2
+NUM_VIEWS_Z=2
+NUM_VIEWS_RANDOM=10
 RADIUS = 2.0
 ELEVATION = math.radians(30)
 

@@ -411,11 +411,14 @@ def render_objects(
     with open(PROCESSED_DATA,"r") as processed:
         for line in processed.readlines():
             processed_set.add(line)
+            
+    print("len processed",len(processed_set))
     alignment_annotations = oxl.get_alignment_annotations(
         download_dir=OBJAVERSE_DIR# default download directory
     )
-    
+    print("len alignmeent",len(alignment_annotations))
     alignment_annotations=alignment_annotations[~alignment_annotations["fileIdentifier"].isin(processed_set)]
+    print("len assignemtn ",len(alignment_annotations))
     objects.iloc[0]["fileIdentifier"]
     objects = objects.copy()
     logger.info(f"Provided {len(objects)} objects to render.")

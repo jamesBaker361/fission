@@ -17,9 +17,9 @@
 
 #SBATCH --qos=long
 
-#SBATCH --output=slurm_chip/generic/%j.out  # STDOUT output file
+#SBATCH --output=slurm_chip_bash/generic/%j.out  # STDOUT output file
 
-#SBATCH --error=slurm_chip/generic/%j.err   # STDERR output file (optional)
+#SBATCH --error=slurm_chip_bash/generic/%j.err   # STDERR output file (optional)
 
 day=$(date +'%m/%d/%Y %R')
 echo "cpu"  ${day} $SLURM_JOBID "node_list" $SLURM_NODELIST $@  "\n" >> jobs.txt

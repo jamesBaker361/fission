@@ -19,10 +19,20 @@ from loguru import logger
 
 import objaverse.xl as oxl
 from objaverse.utils import get_uid_from_str
+from blender_script import init_bpy,render_object
+import shutil
+
 
 OBJAVERSE_DIR="objaverse"
+os.makedirs(OBJAVERSE_DIR,exist_ok=True)
 
 PROCESSED_DATA=os.path.join(OBJAVERSE_DIR,"done.txt")
+MISSING_OBJECT=os.path.join(OBJAVERSE_DIR,"missing.txt")
+
+total, used, free = shutil.disk_usage(OBJAVERSE_DIR)
+print(f"Free space: {free / 1e9:.2f} GB")
+print(f"Total avail {total / 1e9:.2f} GB")
+print(f"Used avail {used / 1e9:.2f} GB")
 
 
 def log_processed_object(csv_filename: str,file_identifier:str ,*args) -> None:
@@ -42,7 +52,7 @@ def log_processed_object(csv_filename: str,file_identifier:str ,*args) -> None:
     os.makedirs(dirname, exist_ok=True)
     with open(os.path.join(dirname, csv_filename), "a", encoding="utf-8") as f:
         f.write(f"{time.time()},{args}\n")
-    with open(PROCESSED_DATA,"a") as file:
+    with open(PROCESSED_DATA,"a+") as file:
         file.write(file_identifier+"\n")
 
 
@@ -106,112 +116,29 @@ def handle_found_object(
     """
     save_uid = get_uid_from_str(file_identifier)
     args = f"--object_path '{local_path}' --num_renders {num_renders}"
+    
+    
+    target_directory = os.path.join(OBJAVERSE_DIR, "renders",save_uid)
+    os.makedirs(target_directory,exist_ok=True)
+    render_object(object_file=local_path,num_renders=num_renders,only_northern_hemisphere=only_northern_hemisphere,output_dir=target_directory)
+    
+   # update the metadata
+    metadata_path = os.path.join(target_directory, "metadata.json")
+    with open(metadata_path, "r", encoding="utf-8") as f:
+        metadata_file = json.load(f)
+    metadata_file["sha256"] = sha256
+    metadata_file["file_identifier"] = file_identifier
+    metadata_file["save_uid"] = save_uid
+    metadata_file["metadata"] = metadata
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(metadata_file, f, indent=2, sort_keys=True)
+        
+    # log that this object was rendered successfully
+    if successful_log_file is not None:
+        log_processed_object(successful_log_file, file_identifier, sha256)
 
-    # get the GPU to use for rendering
-    using_gpu: bool = True
-    gpu_i = 0
-    if isinstance(gpu_devices, int) and gpu_devices > 0:
-        num_gpus = gpu_devices
-        gpu_i = random.randint(0, num_gpus - 1)
-    elif isinstance(gpu_devices, list):
-        gpu_i = random.choice(gpu_devices)
-    elif isinstance(gpu_devices, int) and gpu_devices == 0:
-        using_gpu = False
-    else:
-        raise ValueError(
-            f"gpu_devices must be an int > 0, 0, or a list of ints. Got {gpu_devices}."
-        )
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        # get the target directory for the rendering job
-        target_directory = os.path.join(temp_dir, save_uid)
-        os.makedirs(target_directory, exist_ok=True)
-        args += f" --output_dir {target_directory}"
-
-        # check for Linux / Ubuntu or MacOS
-        if platform.system() == "Linux" and using_gpu:
-            args += " --engine BLENDER_EEVEE"
-        elif platform.system() == "Darwin" or (
-            platform.system() == "Linux" and not using_gpu
-        ):
-            # As far as I know, MacOS does not support BLENER_EEVEE, which uses GPU
-            # rendering. Generally, I'd only recommend using MacOS for debugging and
-            # small rendering jobs, since CYCLES is much slower than BLENDER_EEVEE.
-            args += " --engine CYCLES"
-        else:
-            raise NotImplementedError(f"Platform {platform.system()} is not supported.")
-
-        # check if we should only render the northern hemisphere
-        if only_northern_hemisphere:
-            args += " --only_northern_hemisphere"
-
-        # get the command to run
-        command = f"blender/blender-5.0.1-linux-x64/blender --background --python blender_script.py -- {args}"
-        if using_gpu:
-            command = f"export DISPLAY=:0.{gpu_i} && {command}"
-
-        # render the object (put in dev null)
-        subprocess.run(
-            ["bash", "-c", command],
-            timeout=render_timeout,
-            check=False,
-            #stdout=subprocess.DEVNULL,
-            #stderr=subprocess.DEVNULL,
-        )
-
-        # check that the renders were saved successfully
-        png_files = glob.glob(os.path.join(target_directory, "*.png"))
-        metadata_files = glob.glob(os.path.join(target_directory, "*.json"))
-        npy_files = glob.glob(os.path.join(target_directory, "*.npy"))
-        if (
-            (len(png_files) != num_renders)
-            or (len(npy_files) != num_renders)
-            or (len(metadata_files) != 1)
-        ):
-            logger.error(
-                f"Found object {file_identifier} was not rendered successfully!"
-            )
-            if failed_log_file is not None:
-                log_processed_object(
-                    failed_log_file,
-                    file_identifier,
-                    sha256,
-                )
-            return False
-
-        # update the metadata
-        metadata_path = os.path.join(target_directory, "metadata.json")
-        with open(metadata_path, "r", encoding="utf-8") as f:
-            metadata_file = json.load(f)
-        metadata_file["sha256"] = sha256
-        metadata_file["file_identifier"] = file_identifier
-        metadata_file["save_uid"] = save_uid
-        metadata_file["metadata"] = metadata
-        with open(metadata_path, "w", encoding="utf-8") as f:
-            json.dump(metadata_file, f, indent=2, sort_keys=True)
-
-        # Make a zip of the target_directory.
-        # Keeps the {save_uid} directory structure when unzipped
-        with zipfile.ZipFile(
-            f"{target_directory}.zip", "w", zipfile.ZIP_DEFLATED
-        ) as ziph:
-            zipdir(target_directory, ziph)
-
-        # move the zip to the render_dir
-        fs, path = fsspec.core.url_to_fs(render_dir)
-
-        # move the zip to the render_dir
-        fs.makedirs(os.path.join(path, "renders"), exist_ok=True)
-        fs.put(
-            os.path.join(f"{target_directory}.zip"),
-            os.path.join(path, "renders", f"{save_uid}.zip"),
-        )
-
-        # log that this object was rendered successfully
-        if successful_log_file is not None:
-            log_processed_object(successful_log_file, file_identifier, sha256)
-
-        return True
+    
+    return True
 
 
 def handle_new_object(
@@ -336,7 +263,10 @@ def handle_missing_object(
         None
     """
     # log the missing object
+    with open(MISSING_OBJECT,"a") as file:
+        file.write(file_identifier+"\n")
     log_processed_object(log_file, file_identifier, sha256)
+    print()
 
 
 def get_example_objects() -> pd.DataFrame:
@@ -397,10 +327,8 @@ def render_objects(
         )
 
     # get the gpu devices to use
-    parsed_gpu_devices: Union[int, List[int]] = 0
-    if gpu_devices is None:
-        parsed_gpu_devices = len(GPUtil.getGPUs())
-    logger.info(f"Using {parsed_gpu_devices} GPU devices for rendering.")
+    gpu_devices = len(GPUtil.getGPUs())
+    logger.info(f"Using {gpu_devices} GPU devices for rendering.")
 
     if processes is None:
         processes = multiprocessing.cpu_count() * 3
@@ -408,9 +336,12 @@ def render_objects(
     # get the objects to render
     #objects = get_example_objects()
     processed_set=set()
-    with open(PROCESSED_DATA,"r") as processed:
-        for line in processed.readlines():
-            processed_set.add(line)
+    try:
+        with open(PROCESSED_DATA,"r") as processed:
+            for line in processed.readlines():
+                processed_set.add(line.strip())
+    except FileNotFoundError:
+        print(PROCESSED_DATA,"not written yet")
             
     print("len processed",len(processed_set))
     alignment_annotations = oxl.get_alignment_annotations(
@@ -419,12 +350,13 @@ def render_objects(
     print("len alignmeent",len(alignment_annotations))
     alignment_annotations=alignment_annotations[~alignment_annotations["fileIdentifier"].isin(processed_set)]
     print("len assignemtn ",len(alignment_annotations))
-    objects.iloc[0]["fileIdentifier"]
+    objects=alignment_annotations
     objects = objects.copy()
     logger.info(f"Provided {len(objects)} objects to render.")
 
     # get the already rendered objects
     fs, path = fsspec.core.url_to_fs(render_dir)
+    print("render dir path",path,'render dir' ,render_dir)
     try:
         zip_files = fs.glob(os.path.join(path, "renders", "*.zip"), refresh=True)
     except TypeError:
@@ -442,7 +374,39 @@ def render_objects(
 
     # shuffle the objects
     objects = objects.sample(frac=1).reset_index(drop=True)
-
+    
+     # get the GPU to use for rendering
+    using_gpu: bool = True
+    gpu_i = 0
+    if isinstance(gpu_devices, int) and gpu_devices > 0:
+        num_gpus = gpu_devices
+        gpu_i = random.randint(0, num_gpus - 1)
+    elif isinstance(gpu_devices, list):
+        gpu_i = random.choice(gpu_devices)
+    elif isinstance(gpu_devices, int) and gpu_devices == 0:
+        using_gpu = False
+    else:
+        raise ValueError(
+            f"gpu_devices must be an int > 0, 0, or a list of ints. Got {gpu_devices}."
+        )
+    
+    # check for Linux / Ubuntu or MacOS
+    if platform.system() == "Linux" and using_gpu:
+        engine= "BLENDER_EEVEE"
+    elif platform.system() == "Darwin" or (
+        platform.system() == "Linux" and not using_gpu
+    ):
+        # As far as I know, MacOS does not support BLENER_EEVEE, which uses GPU
+        # rendering. Generally, I'd only recommend using MacOS for debugging and
+        # small rendering jobs, since CYCLES is much slower than BLENDER_EEVEE.
+        engine= "CYCLES"
+    else:
+        raise NotImplementedError(f"Platform {platform.system()} is not supported.")
+    
+    init_bpy(engine)
+    tmp=os.environ["TMP_DIR"]
+    os.makedirs(tmp,exist_ok=True)
+    tempfile.tempdir =tmp
     oxl.download_objects(
         objects=objects,
         processes=processes,
@@ -453,7 +417,7 @@ def render_objects(
             render_dir=render_dir,
             num_renders=num_renders,
             only_northern_hemisphere=only_northern_hemisphere,
-            gpu_devices=parsed_gpu_devices,
+            gpu_devices=gpu_devices,
             render_timeout=render_timeout,
         ),
         handle_new_object=handle_new_object,
@@ -462,7 +426,7 @@ def render_objects(
             render_dir=render_dir,
             num_renders=num_renders,
             only_northern_hemisphere=only_northern_hemisphere,
-            gpu_devices=parsed_gpu_devices,
+            gpu_devices=gpu_devices,
             render_timeout=render_timeout,
         ),
         handle_missing_object=handle_missing_object,

@@ -3,6 +3,7 @@ import os
 import csv
 from diffusers.image_processor import VaeImageProcessor
 from PIL import Image
+import itertools
 
 class ImageData(Dataset):
     def __init__(self,render_dir:str,dim:int):
@@ -36,8 +37,35 @@ class ImageData(Dataset):
         
         return output
     
+class ImageDataPaired(Dataset):
+    def __init__(self,render_dir:str,dim:int):
+        super().__init__()
+        self.render_dir=render_dir
+        self.dim=dim
+        metadata_path=os.path.join(render_dir,"metadata.csv")
+        self.metadata=[]
+        self.image_processor=VaeImageProcessor()
+        self.metadata_dict={}
+        with open(metadata_path) as file:
+            metadata=csv.DictReader(file)
+            self.metadata=[r for r in metadata]
+        for i,row in enumerate( metadata):
+            key=row["category"]+"_"+row["instance"]
+            if key not in self.metadata_dict:
+                self.metadata_dict[key]=[]
+            self.metadata_dict[key].append(i)
+        self.index_pair_list=[]
+        for key,value in self.metadata_dict.items():
+            pairs= list(itertools.combinations(value, 2))
+            self.index_pair_list+=pairs
+    
+    def __len__(self):
+        return len()
+            
+        
+    
 if __name__=='__main__':
-    data=ImageData("scale_renders")
+    data=ImageData("scale_renders",dim=128)
     print("len",len(data))
     for batch in data:
         break

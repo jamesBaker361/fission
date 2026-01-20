@@ -8,24 +8,30 @@ import random
 import sys
 from typing import Any, Callable, Dict, Generator, List, Literal, Optional, Set, Tuple
 
+import urllib
+import zipfile
 import bpy
 import numpy as np
 from mathutils import Matrix, Vector
 
 IMPORT_FUNCTIONS: Dict[str, Callable] = {
-    "obj": bpy.ops.import_scene.obj,
+    "obj": bpy.ops.wm.obj_import,
     "glb": bpy.ops.import_scene.gltf,
     "gltf": bpy.ops.import_scene.gltf,
     "usd": bpy.ops.import_scene.usd,
-    "fbx": bpy.ops.import_scene.fbx,
-    "stl": bpy.ops.import_mesh.stl,
+    "fbx": bpy.ops.wm.fbx_import,
+    "stl": bpy.ops.wm.stl_import,
     "usda": bpy.ops.import_scene.usda,
-    "dae": bpy.ops.wm.collada_import,
-    "ply": bpy.ops.import_mesh.ply,
+    "dae": bpy.ops.wm.collada_import, #this is no longer supported
+    "ply": bpy.ops.wm.ply_import,
     "abc": bpy.ops.wm.alembic_import,
     "blend": bpy.ops.wm.append,
 }
 
+context = bpy.context
+scene = context.scene
+render = scene.render
+bpy.app.binary_path=os.path.join("blend","blender-5.0.1-linux-x64","blender")
 
 def reset_cameras() -> None:
     """Resets the cameras in the scene to a single default camera."""
@@ -300,8 +306,8 @@ def load_object(object_path: str) -> None:
 
     if file_extension == "usdz":
         # install usdz io package
-        dirname = os.path.dirname(os.path.realpath(__file__))
-        usdz_package = os.path.join(dirname, "io_scene_usdz.zip")
+        '''dirname = os.path.dirname(os.path.realpath(__file__))'''
+        usdz_package = os.path.abspath( "io_scene_usdz.zip")
         bpy.ops.preferences.addon_install(filepath=usdz_package)
         # enable it
         addon_name = "io_scene_usdz"
@@ -758,6 +764,8 @@ def render_object(
         bpy.ops.object.mode_set(mode="OBJECT")
         reset_cameras()
         delete_invisible_objects()
+    elif object_file.endswith(".dae"):
+        return
     else:
         reset_scene()
         load_object(object_file)
@@ -809,7 +817,7 @@ def render_object(
 
     # randomize the lighting
     randomize_lighting()
-
+    print(f"saving {object_file} to {output_dir}...")
     # render the images
     for i in range(num_renders):
         # set camera
@@ -826,6 +834,68 @@ def render_object(
         rt_matrix = get_3x4_RT_matrix_from_blender(camera)
         rt_matrix_path = os.path.join(output_dir, f"{i:03d}.npy")
         np.save(rt_matrix_path, rt_matrix)
+    print(f"...saved {object_file} to {output_dir}")
+
+def install_io_scene_usdz():
+    # --- 1. Download the add-on ZIP ---
+    addon_url = "https://raw.githubusercontent.com/robmcrosby/BlenderUSDZ/master/io_scene_usdz.zip"
+    zip_path = os.path.join("io_scene_usdz.zip")
+
+    print(f"Downloading io_scene_usdz add-on to {zip_path}...")
+    urllib.request.urlretrieve(addon_url, zip_path)
+
+    '''# --- 2. Extract ZIP to Blender add-ons folder ---
+    addon_dir = os.path.join(bpy.utils.user_resource('SCRIPTS', "addons"), "io_scene_usdz")
+    print(f"Extracting add-on to {addon_dir}...")
+
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        # Remove old folder if exists
+        if os.path.exists(addon_dir):
+            import shutil
+            shutil.rmtree(addon_dir)
+        zip_ref.extractall(addon_dir)
+
+    # The ZIP contains a folder named io_scene_usdz-master, move its contents up
+    import shutil
+    master_dir = os.path.join(addon_dir, "io_scene_usdz-master")
+    for item in os.listdir(master_dir):
+        shutil.move(os.path.join(master_dir, item), addon_dir)
+    shutil.rmtree(master_dir)'''
+
+    # --- 3. Enable the add-on ---
+    filepath=os.path.abspath(zip_path)
+    bpy.ops.preferences.addon_install(filepath=filepath, overwrite=True)
+    bpy.ops.preferences.addon_enable(module="io_scene_usdz")
+
+def init_bpy(engine):
+    
+
+    # Set render settings
+    try:
+        bpy.ops.preferences.addon_enable(module="io_scene_usdz")
+    except RuntimeError:
+        install_io_scene_usdz()
+    render.engine = engine
+    render.image_settings.file_format = "PNG"
+    render.image_settings.color_mode = "RGBA"
+    render.resolution_x = 512
+    render.resolution_y = 512
+    render.resolution_percentage = 100
+
+    # Set cycles settings
+    scene.cycles.device = "GPU"
+    scene.cycles.samples = 128
+    scene.cycles.diffuse_bounces = 1
+    scene.cycles.glossy_bounces = 1
+    scene.cycles.transparent_max_bounces = 3
+    scene.cycles.transmission_bounces = 3
+    scene.cycles.filter_width = 0.01
+    scene.cycles.use_denoising = True
+    scene.render.film_transparent = True
+    bpy.context.preferences.addons["cycles"].preferences.get_devices()
+    bpy.context.preferences.addons[
+        "cycles"
+    ].preferences.compute_device_type = "CUDA"  # or "OPENCL"
 
 
 if __name__ == "__main__":
@@ -863,33 +933,8 @@ if __name__ == "__main__":
     argv = sys.argv[sys.argv.index("--") + 1 :]
     args = parser.parse_args(argv)
 
-    context = bpy.context
-    scene = context.scene
-    render = scene.render
-
-    # Set render settings
-    render.engine = args.engine
-    render.image_settings.file_format = "PNG"
-    render.image_settings.color_mode = "RGBA"
-    render.resolution_x = 512
-    render.resolution_y = 512
-    render.resolution_percentage = 100
-
-    # Set cycles settings
-    scene.cycles.device = "GPU"
-    scene.cycles.samples = 128
-    scene.cycles.diffuse_bounces = 1
-    scene.cycles.glossy_bounces = 1
-    scene.cycles.transparent_max_bounces = 3
-    scene.cycles.transmission_bounces = 3
-    scene.cycles.filter_width = 0.01
-    scene.cycles.use_denoising = True
-    scene.render.film_transparent = True
-    bpy.context.preferences.addons["cycles"].preferences.get_devices()
-    bpy.context.preferences.addons[
-        "cycles"
-    ].preferences.compute_device_type = "CUDA"  # or "OPENCL"
-
+    init_bpy(engine=args.engine)
+    
     # Render the images
     render_object(
         object_file=args.object_path,

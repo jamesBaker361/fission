@@ -17,6 +17,8 @@
 
 #SBATCH --qos=long
 
+#SBATCH --time=5-00:00:00  
+
 #SBATCH --output=slurm_chip/generic/%j.out  # STDOUT output file
 
 #SBATCH --error=slurm_chip/generic/%j.err   # STDERR output file (optional)

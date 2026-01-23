@@ -127,7 +127,7 @@ def render_obj(
         direction = obj.location - camera.location
         camera.rotation_euler = direction.to_track_quat('-Z', 'Y').to_euler()
         path=os.path.join(
-            out_dir, f"view_{count:03d}.png"
+            out_dir, f"{category}_{instance}_view_{count:03d}.png"
         )
         scene.render.filepath = path
         bpy.ops.render.render(write_still=True)

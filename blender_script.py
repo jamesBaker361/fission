@@ -765,6 +765,7 @@ def render_object(
         reset_cameras()
         delete_invisible_objects()
     elif object_file.endswith(".dae"):
+        print("ends with dae, no longer supported")
         return
     else:
         reset_scene()
@@ -789,6 +790,7 @@ def render_object(
         object_path=object_file, scene=scene, bdata=bpy.data
     )
     metadata = metadata_extractor.get_metadata()
+    print(f"saving {object_file} to {output_dir}...")
 
     # delete all objects that are not meshes
     if object_file.lower().endswith(".usdz"):
@@ -817,7 +819,7 @@ def render_object(
 
     # randomize the lighting
     randomize_lighting()
-    print(f"saving {object_file} to {output_dir}...")
+    
     # render the images
     for i in range(num_renders):
         # set camera

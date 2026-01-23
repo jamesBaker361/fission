@@ -7,6 +7,7 @@ nltk.download('wordnet')
 from nltk.corpus import wordnet as wn
 import math
 import bpy
+import json
 
 from render_images import render_obj
 
@@ -35,7 +36,7 @@ for zf in files:
         zip_ref.extractall(dest_path)
     print("done!")'''
     
-OUT_DIR = "scale_renders"
+OUT_DIR = "shapenet_renders"
 os.makedirs(OUT_DIR,exist_ok=True)
 
 NUM_VIEWS = 8
@@ -52,6 +53,14 @@ with open(CSV_PATH,"w") as csv_file:
     
 count=0
 
+finished_json_path=os.path.join(OUT_DIR,"finished.json")
+
+if os.path.exists(finished_json_path):
+    with open(finished_json_path,"r") as file:
+        finished=[r for r in file.readlines()]
+else:
+    finished=[]
+
 files=[file for file in os.listdir(src_dir) if os.path.isdir(os.path.join(src_dir,file))]
 for file in files:
     for subdir in os.listdir(os.path.join(src_dir,file)):
@@ -63,11 +72,14 @@ for file in files:
                 sub_subdir_path=os.path.join(subdir_path,subsubdir)
                 bpy.ops.wm.read_factory_settings(use_empty=True)
                 model_path=os.path.join(sub_subdir_path,"models","model_normalized.obj")
-                bpy.ops.wm.obj_import(filepath=model_path)
-                print("subsusdir path" , model_path)
-                count=render_obj(
-                    OUT_DIR,ENGINE,IMAGE_RES,NUM_VIEWS,RADIUS,NUM_VIEWS_Z, 
-                    NUM_VIEWS_RANDOM,
-                    CSV_PATH,file,subsubdir,count,
-                )
+                if model_path not in finished:
+                    bpy.ops.wm.obj_import(filepath=model_path)
+                    print("subsusdir path" , model_path)
+                    count=render_obj(
+                        OUT_DIR,ENGINE,IMAGE_RES,NUM_VIEWS,RADIUS,NUM_VIEWS_Z, 
+                        NUM_VIEWS_RANDOM,
+                        CSV_PATH,file,subsubdir,count,
+                    )
+                    with open(finished_json_path,"a+") as file:
+                        file.write(model_path+"\n")
                 print("images ",count)

@@ -118,14 +118,17 @@ def handle_found_object(
     args = f"--object_path '{local_path}' --num_renders {num_renders}"
     
     
-    target_directory = os.path.join(OBJAVERSE_DIR, "renders",save_uid)
+    target_directory = os.path.join("/umbc/rs/pi_donengel/users/jbaker15/fission",OBJAVERSE_DIR, "renders",save_uid)
     os.makedirs(target_directory,exist_ok=True)
     render_object(object_file=local_path,num_renders=num_renders,only_northern_hemisphere=only_northern_hemisphere,output_dir=target_directory)
     
    # update the metadata
     metadata_path = os.path.join(target_directory, "metadata.json")
-    with open(metadata_path, "r", encoding="utf-8") as f:
-        metadata_file = json.load(f)
+    if os.path.exists(metadata_path):
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            metadata_file = json.load(f)
+    else:
+        metadata_file={}
     metadata_file["sha256"] = sha256
     metadata_file["file_identifier"] = file_identifier
     metadata_file["save_uid"] = save_uid
@@ -344,13 +347,15 @@ def render_objects(
         print(PROCESSED_DATA,"not written yet")
             
     print("len processed",len(processed_set))
-    alignment_annotations = oxl.get_alignment_annotations(
+    objects = oxl.get_annotations(
         download_dir=OBJAVERSE_DIR# default download directory
     )
-    print("len alignmeent",len(alignment_annotations))
-    alignment_annotations=alignment_annotations[~alignment_annotations["fileIdentifier"].isin(processed_set)]
-    print("len assignemtn ",len(alignment_annotations))
-    objects=alignment_annotations
+    print("len objects",len(objects))
+    objects=objects[~objects["fileIdentifier"].isin(processed_set)]
+    print("len objects",len(objects))
+    
+    #objects=get_example_objects()
+    
     objects = objects.copy()
     logger.info(f"Provided {len(objects)} objects to render.")
 

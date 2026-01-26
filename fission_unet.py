@@ -1,7 +1,9 @@
-from diffusers.models.unets.unet_2d_blocks import get_down_block,get_mid_block,get_up_block
+from diffusers.models.unets.unet_2d_blocks import get_down_block,get_mid_block,get_up_block,UpBlock2D,CrossAttnUpBlock2D,apply_freeu
 from diffusers import UNet2DConditionModel
+from diffusers.models.resnet import ResnetBlock2D
+from diffusers.models.activations import get_activation
 import torch
-from typing import Optional,List
+from typing import Optional,List,Tuple,Dict,Any
 from diffusers.models.embeddings import (
     GaussianFourierProjection,
     GLIGENTextBoundingboxProjection,
@@ -14,6 +16,268 @@ from diffusers.models.embeddings import (
     TimestepEmbedding,
     Timesteps,
 )
+
+import torchvision.transforms.functional as F
+
+class SplitBlock(torch.nn.Module):
+    def __init__(self,in_channels, prev_output_channels, out_channels,groups:int,eps:float,non_linearity:str, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.in_channels=in_channels
+        self.prev_output_channels=prev_output_channels
+        self.out_channels=out_channels
+        
+        self.norm1=torch.nn.GroupNorm(num_groups=groups, num_channels=in_channels, eps=eps, affine=True)
+        self.conv1=torch.nn.Conv2d(in_channels+out_channels,out_channels,kernel_size=3, stride=1, padding=1)
+        self.norm2 = torch.nn.GroupNorm(num_groups=groups, num_channels=out_channels, eps=eps, affine=True)
+        self.conv2 = torch.nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
+
+        self.nonlinearity = get_activation(non_linearity)
+        
+    def forward(
+        self,
+        hidden_states,
+        past_input_tensor
+    ):
+
+        hidden_states = self.norm1(hidden_states)
+        hidden_states = self.nonlinearity(hidden_states)
+        
+        dim=hidden_states.size()[-1]
+        
+        past_input_tensor=F.resize(past_input_tensor,(dim,dim))
+        
+        hidden_states=torch.cat([hidden_states,past_input_tensor],dim=1)
+        
+        hidden_states = self.conv1(hidden_states)
+        
+        hidden_states = self.nonlinearity(hidden_states)
+
+        hidden_states = self.conv2(hidden_states)
+        
+        return hidden_states
+        
+
+
+class UpBlock2DNoRes(torch.nn.Module):
+    def __init__(self, in_channels, prev_output_channel, out_channels, temb_channels, resolution_idx = None, dropout = 0, num_layers = 1, resnet_eps = 0.000001, resnet_time_scale_shift = "default", resnet_act_fn = "swish", resnet_groups = 32, resnet_pre_norm = True, output_scale_factor = 1, add_upsample = True):
+        #super().__init__(in_channels, prev_output_channel, out_channels, temb_channels, resolution_idx, dropout, num_layers, resnet_eps, resnet_time_scale_shift, resnet_act_fn, resnet_groups, resnet_pre_norm, output_scale_factor, add_upsample)
+        super().__init__()
+        resnets = []
+
+        for i in range(num_layers):
+            res_inpput_channel=in_channels
+            res_output_channel=in_channels
+            if i==num_layers-1:
+                res_output_channel=out_channels
+            
+            
+
+            resnets.append(
+                ResnetBlock2D(
+                    in_channels=res_inpput_channel,
+                    out_channels=res_output_channel,
+                    temb_channels=temb_channels,
+                    eps=resnet_eps,
+                    groups=resnet_groups,
+                    dropout=dropout,
+                    time_embedding_norm=resnet_time_scale_shift,
+                    non_linearity=resnet_act_fn,
+                    output_scale_factor=output_scale_factor,
+                    pre_norm=resnet_pre_norm,
+                )
+            )
+
+        self.resnets = torch.nn.ModuleList(resnets)
+
+        if add_upsample:
+            self.upsamplers = torch.nn.ModuleList([Upsample2D(out_channels, use_conv=True, out_channels=out_channels)])
+        else:
+            self.upsamplers = None
+
+        self.gradient_checkpointing = False
+        self.resolution_idx = resolution_idx
+        
+        
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        res_hidden_states_tuple: Tuple[torch.Tensor, ...],
+        temb: Optional[torch.Tensor] = None,
+        upsample_size: Optional[int] = None,
+        *args,
+        **kwargs,
+    ) -> torch.Tensor:
+
+        is_freeu_enabled = (
+            getattr(self, "s1", None)
+            and getattr(self, "s2", None)
+            and getattr(self, "b1", None)
+            and getattr(self, "b2", None)
+        )
+
+        for resnet in self.resnets:
+            print("fuck u")
+            # pop res hidden states
+            res_hidden_states = res_hidden_states_tuple[-1]
+            res_hidden_states_tuple = res_hidden_states_tuple[:-1]
+
+            # FreeU: Only operate on the first two stages
+            if is_freeu_enabled:
+                hidden_states, res_hidden_states = apply_freeu(
+                    self.resolution_idx,
+                    hidden_states,
+                    res_hidden_states,
+                    s1=self.s1,
+                    s2=self.s2,
+                    b1=self.b1,
+                    b2=self.b2,
+                )
+
+            #hidden_states = torch.cat([hidden_states, res_hidden_states], dim=1)
+
+            if torch.is_grad_enabled() and self.gradient_checkpointing:
+                hidden_states = self._gradient_checkpointing_func(resnet, hidden_states, temb)
+            else:
+                hidden_states = resnet(hidden_states, temb)
+
+        if self.upsamplers is not None:
+            for upsampler in self.upsamplers:
+                hidden_states = upsampler(hidden_states, upsample_size)
+
+        return hidden_states
+    
+class CrossAttnUpBlock2NoRes(CrossAttnUpBlock2D):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        res_hidden_states_tuple: Tuple[torch.Tensor, ...],
+        temb: Optional[torch.Tensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        cross_attention_kwargs: Optional[Dict[str, Any]] = None,
+        upsample_size: Optional[int] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+        **kwargs
+    ) -> torch.Tensor:
+
+
+        is_freeu_enabled = (
+            getattr(self, "s1", None)
+            and getattr(self, "s2", None)
+            and getattr(self, "b1", None)
+            and getattr(self, "b2", None)
+        )
+
+        for resnet, attn in zip(self.resnets, self.attentions):
+            # pop res hidden states
+            res_hidden_states = res_hidden_states_tuple[-1]
+            res_hidden_states_tuple = res_hidden_states_tuple[:-1]
+
+            # FreeU: Only operate on the first two stages
+            if is_freeu_enabled:
+                hidden_states, res_hidden_states = apply_freeu(
+                    self.resolution_idx,
+                    hidden_states,
+                    res_hidden_states,
+                    s1=self.s1,
+                    s2=self.s2,
+                    b1=self.b1,
+                    b2=self.b2,
+                )
+
+            #hidden_states = torch.cat([hidden_states, res_hidden_states], dim=1)
+
+            if torch.is_grad_enabled() and self.gradient_checkpointing:
+                hidden_states = self._gradient_checkpointing_func(resnet, hidden_states, temb)
+                hidden_states = attn(
+                    hidden_states,
+                    encoder_hidden_states=encoder_hidden_states,
+                    cross_attention_kwargs=cross_attention_kwargs,
+                    attention_mask=attention_mask,
+                    encoder_attention_mask=encoder_attention_mask,
+                    return_dict=False,
+                )[0]
+            else:
+                hidden_states = resnet(hidden_states, temb)
+                hidden_states = attn(
+                    hidden_states,
+                    encoder_hidden_states=encoder_hidden_states,
+                    cross_attention_kwargs=cross_attention_kwargs,
+                    attention_mask=attention_mask,
+                    encoder_attention_mask=encoder_attention_mask,
+                    return_dict=False,
+                )[0]
+
+        if self.upsamplers is not None:
+            for upsampler in self.upsamplers:
+                hidden_states = upsampler(hidden_states, upsample_size)
+
+        return hidden_states
+
+def custom_get_up_block(up_block_type,num_layers: int,
+    in_channels: int,
+    out_channels: int,
+    prev_output_channel: int,
+    temb_channels: int,
+    add_upsample: bool,
+    resnet_eps: float,
+    resnet_act_fn: str,
+    resolution_idx: Optional[int] = None,
+    transformer_layers_per_block: int = 1,
+    num_attention_heads: Optional[int] = None,
+    resnet_groups: Optional[int] = None,
+    cross_attention_dim: Optional[int] = None,
+    dual_cross_attention: bool = False,
+    use_linear_projection: bool = False,
+    only_cross_attention: bool = False,
+    upcast_attention: bool = False,
+    resnet_time_scale_shift: str = "default",
+    attention_type: str = "default",
+    resnet_skip_time_act: bool = False,
+    resnet_out_scale_factor: float = 1.0,
+    cross_attention_norm: Optional[str] = None,
+    attention_head_dim: Optional[int] = None,
+    upsample_type: Optional[str] = None,
+    dropout: float = 0.0,):
+    if up_block_type=="UpBlock2DNoRes":
+        return UpBlock2DNoRes(
+            in_channels,
+            out_channels,
+            prev_output_channel,
+            temb_channels,
+            num_layers=num_layers,
+            resolution_idx=resolution_idx,
+            dropout=dropout,
+            add_upsample=add_upsample,
+            resnet_eps=resnet_eps,
+            resnet_act_fn=resnet_act_fn,
+            resnet_groups=resnet_groups,
+            resnet_time_scale_shift=resnet_time_scale_shift,
+        )
+    elif up_block_type=="CrossAttnUpBlock2NoRes":
+        return CrossAttnUpBlock2NoRes(
+            in_channels,
+            out_channels,
+            prev_output_channel,
+            temb_channels,
+            num_layers=num_layers,
+            transformer_layers_per_block=transformer_layers_per_block,
+
+            resolution_idx=resolution_idx,
+            dropout=dropout,
+            add_upsample=add_upsample,
+            resnet_eps=resnet_eps,
+            resnet_act_fn=resnet_act_fn,
+            resnet_groups=resnet_groups,
+            cross_attention_dim=cross_attention_dim,
+            num_attention_heads=num_attention_heads,
+            dual_cross_attention=dual_cross_attention,
+            use_linear_projection=use_linear_projection,
+            only_cross_attention=only_cross_attention,
+            upcast_attention=upcast_attention,
+            resnet_time_scale_shift=resnet_time_scale_shift,
+            attention_type=attention_type,
+        )
 
 class FissionUNet2DConditionModel(UNet2DConditionModel):
     def __init__(self,
@@ -34,7 +298,7 @@ class FissionUNet2DConditionModel(UNet2DConditionModel):
                     ],
                 mid_block_type_list: List[str] = ["UNetMidBlock2DCrossAttn"],
                 up_block_type_list: List[str] = ["UpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D"],
-        
+                split_block_type:str="UpBlock2DNoRes",
                  
                  resnet_act_fn: str="silu",
                  resnet_eps:float=1e-05,
@@ -71,6 +335,8 @@ class FissionUNet2DConditionModel(UNet2DConditionModel):
         freq_shift: int = 0,
         time_embedding_act_fn: str = "silu",
         n_metadata:int=0,
+        merge_down_block_type:str="DownBlock2D",
+        merge_up_block_type:str="UpBlock2D",
                  *args, **kwargs):
         super().__init__(*args, **kwargs)
         
@@ -117,30 +383,23 @@ class FissionUNet2DConditionModel(UNet2DConditionModel):
         down_in_channel_list=[block_out_channels[0]]+block_out_channels[:-1]
         down_out_channel_list=block_out_channels.copy()
         
+        print("down in",down_in_channel_list)
+        print("down out",down_out_channel_list)
+        
         reversed_block_out_channels=block_out_channels[::-1]
         up_prev_output_channel_list=[reversed_block_out_channels[0]]+reversed_block_out_channels[:-1]
         up_out_channel_list=reversed_block_out_channels.copy()
         up_in_channel_list=reversed_block_out_channels[1:]+[reversed_block_out_channels[-1]]
         
-        
+        print("up prev",up_prev_output_channel_list)
+        print("up out",up_out_channel_list)
+        print("up in",up_in_channel_list)
         
         unshared_up_blocks=total_up_blocks-shared_up_blocks
         unshared_mid_blocks=total_mid_blocks-shared_mid_blocks
         
-        shared_block_out_channels=block_out_channels[unshared_up_blocks:]
-        block_out_channels=block_out_channels[:unshared_up_blocks+1]
-        
-        
-        
-        print('block_out_channels',block_out_channels)
-        print('shared_block_out_channels=',shared_block_out_channels)
-        
-        
-        reversed_block_out_channels=block_out_channels[::-1]
-        reversed_shared_block_out_channels=shared_block_out_channels[::-1]
-        
-        print('reversed_shared_block_out_channels',reversed_shared_block_out_channels)
-        print(reversed_block_out_channels, "reversed")
+        self.unshared_up_blocks=unshared_up_blocks
+        self.unshared_mid_blocks=unshared_mid_blocks
         
         temb_channels=time_embed_dim
         
@@ -193,14 +452,14 @@ class FissionUNet2DConditionModel(UNet2DConditionModel):
                         )
                     )
                     if n==0:
-                        print(f"\t unshared down_block {down_block_type} {input_channel} {output_channel} {is_final_down_block}")
+                        print(f"\t unshared down_block {down_block_type} in {input_channel}  out {output_channel} {is_final_down_block}")
             else:
                 self.shared_down.append(
                     get_down_block(
                         down_block_type=down_block_type,
                         num_layers=num_layers,
-                        in_channels=shared_input_channel,
-                        out_channels=shared_output_channel,
+                        in_channels=input_channel,
+                        out_channels=output_channel,
                         downsample_padding=downsample_padding,
                         #temb_channels=temb_channels,
                         add_downsample=not is_final_down_block,
@@ -208,12 +467,13 @@ class FissionUNet2DConditionModel(UNet2DConditionModel):
                     )
                 )
             
-                print(f"\t shared {down_block_type} {shared_input_channel}  {shared_output_channel} {is_final_down_block}")
+                print(f"\t shared {down_block_type} in {input_channel}  out {output_channel} {is_final_down_block}")
                 
         for m in range(total_mid_blocks):
+            mid_block_type=mid_block_type_list[m]
             if m<unshared_mid_blocks:
                 for n in range(n_inputs):
-                    mid_block_type=mid_block_type_list[m]
+                    
                     self.middle[n].append(
                         get_mid_block(
                             mid_block_type=mid_block_type,
@@ -222,7 +482,7 @@ class FissionUNet2DConditionModel(UNet2DConditionModel):
                         )
                     )
                     if n==0:
-                        print(f"\t unshared mid block {mid_block_type} {unshared_mid_in_channels}")
+                        print(f"\t unshared mid block {mid_block_type} {mid_block_channels}")
             else:
                 self.shared_middle.append(
                     get_mid_block(
@@ -233,17 +493,90 @@ class FissionUNet2DConditionModel(UNet2DConditionModel):
                 )
         
         for u in range(total_up_blocks):
-            reverse_input_channel=up_in_channel_list[s]
-            reverse_output_channel = up_out_channel_list[s]
-            prev_output_channel = up_prev_output_channel_list[s]
+            reverse_input_channel=up_in_channel_list[u]
+            reverse_output_channel = up_out_channel_list[u]
+            prev_output_channel = up_prev_output_channel_list[u]
+            is_final_up_block=u==total_up_blocks-1
             
             if u<shared_up_blocks:
+                self.shared_up.append(
+                    get_up_block(up_block_type=up_block_type,
+                                num_layers=num_layers+1,
+                        in_channels=reverse_input_channel,
+                        out_channels=reverse_output_channel,
+                        prev_output_channel=prev_output_channel,
+                        add_upsample=not is_final_up_block,
+                        **generic_kwargs)
+                    
+                )
+                
+                print(f"\t shared {up_block_type} in {reverse_input_channel}  out {reverse_output_channel}  prev {prev_output_channel} {is_final_up_block}")
+            else:
+                for n in range(n_inputs):
+                    self.up[n].append(
+                        get_up_block(up_block_type=up_block_type,
+                                num_layers=num_layers+1,
+                        in_channels=reverse_input_channel,
+                        out_channels=reverse_output_channel,
+                        prev_output_channel=prev_output_channel,
+                        add_upsample=not is_final_up_block,
+                        **generic_kwargs)
+                    )
+                    
+                    if n==0:
+                        print(f"\t unshared {up_block_type} in {reverse_input_channel} out {reverse_output_channel} prev {prev_output_channel} {is_final_up_block}")
+        #merge block
+        
+        if unshared_mid_blocks >0 or unshared_up_blocks>0: #if theres no unshared theres no need to merge
+            self.do_merge=True
+            if unshared_mid_blocks >0: #we go from unshared mid to shared mid
+                unmerged_dim=mid_block_channels *n_inputs
+                merged_dim=mid_block_channels
+            else: #we go from shared up to merged something else
+                if shared_up_blocks>0: #we go from unshared up to shared uo
+                    merged_dim=down_out_channel_list[unshared_up_blocks-1]
+                    unmerged_dim=down_in_channel_list[unshared_up_blocks] * n_inputs
+                else: #we go from unshared up to shared mid
+                    merged_dim=mid_block_channels
+                    unmerged_dim=down_out_channel_list[unshared_up_blocks-1] * n_inputs
+                    
+            print("merge dim ",merged_dim)
+            print("unmerged dim, prev out put dim ",unmerged_dim)
+            
+            self.merge_block=get_down_block(
+                down_block_type=merge_down_block_type,
+                            num_layers=num_layers,
+                            in_channels=unmerged_dim,
+                            out_channels=merged_dim,
+                            downsample_type=downsample_type,
+                            downsample_padding=downsample_padding,
+                            add_downsample=False,
+                            **generic_kwargs
+            )
+            
+            '''self.split_block=get_down_block(down_block_type=merge_down_block_type,
+                                num_layers=num_layers,
+                        in_channels=merged_dim,
+                        out_channels=unmerged_dim,
+                        #prev_output_channel=unmerged_dim,
+                        add_downsample=False,
+                        **generic_kwargs)'''
+            self.split_block=SplitBlock(
+                merged_dim,unmerged_dim,unmerged_dim,resnet_groups,resnet_eps,"swish"
+            )
+            
+                
+                
+        else:
+            self.do_merge=False
+        
+        #split block        
                 
                 
         
         
         
-        for n in range(n_inputs):
+        '''for n in range(n_inputs):
             if unshared_up_blocks>0:
                 for s in range(unshared_up_blocks):
                     input_channel = down_in_channel_list[s] 
@@ -387,26 +720,15 @@ class FissionUNet2DConditionModel(UNet2DConditionModel):
                 )
             )
             print(f"\t shared {mid_block_type} {shared_mid_in_channels}")
+            '''
+        
             
-        if unshared_mid_blocks >0 or unshared_up_blocks>0:
-            
-            if unshared_mid_blocks>0: #unshared mid blocks
-                merge_input_dim=unshared_mid_in_channels*n_inputs
-                merge_output_dim=shared_mid_in_channels
-            else:
-                if shared_up_blocks>0: #shared up blocks
-                    merge_input_dim= up_out_channel_list[shared_up_blocks+unshared_up_blocks-1] #the output dim of the last 
-            
-        self.shared_middle=torch.nn.ModuleList(self.shared)
+        self.shared_middle=torch.nn.ModuleList(self.shared_middle)
         self.shared_down=torch.nn.ModuleList(self.shared_down)
         self.shared_up=torch.nn.ModuleList(self.shared_up)
         self.down=torch.nn.ModuleList([torch.nn.ModuleList(m) for m in  self.down])
         self.middle=torch.nn.ModuleList([torch.nn.ModuleList(m) for m in self.middle])
         self.up=torch.nn.ModuleList([torch.nn.ModuleList(m) for m in self.up])
-        
-        
-        for row in up_list:
-            print(row)
         
         
         self.time_embedding = TimestepEmbedding( #use same embedding model for both 
@@ -485,17 +807,38 @@ class FissionUNet2DConditionModel(UNet2DConditionModel):
                     )
             processed_sample_list.append(sample)
         sample=torch.cat(processed_sample_list,dim=1)
-        shared_residuals=(sample,)
+        
         if metadata is not None:
             shared_temb=torch.sum(torch.stack(t_emb_list+[metadata_emb]),dim=0)
         else:
             shared_temb=sum(t_emb_list)
+        if self.do_merge:
+            past_input_tensor=sample
+            print("before merge",sample.size())
+            if hasattr(self.merge_block, "has_cross_attention") and self.merge_block.has_cross_attention:
+                
+                sample,merge_res_samples=self.merge_block(
+                    hidden_states=sample,
+                        temb=shared_temb,
+                        encoder_hidden_states=encoder_hidden_states_list[n],
+                )
+            else:
+                sample,merge_res_samples=self.merge_block(
+                    hidden_states=sample,
+                        temb=shared_temb,
+                       # encoder_hidden_states=encoder_hidden_states_list[n],
+                )
+            print("post merge ",sample.size())
+            for r in merge_res_samples:
+                print("\tmerged res sample ",r.size())
+        shared_residuals=(sample,)
+        
             
         #print("shared ",shared_temb.size())
         #shared_temb=self.time_embedding(shared_temb)
         #print("shared 2",shared_temb.size())
         for d,downsample_block in enumerate(self.shared_down):
-            #print("shared down",sample.size())
+            print("shared down",sample.size())
             if hasattr(downsample_block, "has_cross_attention") and downsample_block.has_cross_attention:
                 sample, res_samples = downsample_block(
                     hidden_states=sample,
@@ -515,7 +858,7 @@ class FissionUNet2DConditionModel(UNet2DConditionModel):
             
             
         
-        for m,mid_block in enumerate(self.shared):
+        for m,mid_block in enumerate(self.shared_middle):
             print("shared mid",sample.size())
             if hasattr(mid_block, "has_cross_attention") and mid_block.has_cross_attention:
                 sample = mid_block(
@@ -535,7 +878,7 @@ class FissionUNet2DConditionModel(UNet2DConditionModel):
             shared_residuals = shared_residuals[: -len(upsample_block.resnets)]
             
             #if type(res_samples)==tuple:
-            print(u)
+            print(u,sample.size())
             for r in res_samples:
                 print("\t res sample",r.size())
             if hasattr(upsample_block,"has_cross_attention") and upsample_block.has_cross_attention:
@@ -557,10 +900,18 @@ class FissionUNet2DConditionModel(UNet2DConditionModel):
                         temb=shared_temb,
                         res_hidden_states_tuple=res_samples,
                     )
+                
+        if self.unshared_up_blocks==0:
+            return sample
                     
+        if self.do_merge:
+            sample=self.split_block.forward(sample,past_input_tensor)
+            
+            print("post split ",sample.size())
+            split_sample_list=torch.chunk(sample,n_inputs,1)
                     
-                    
-        split_sample_list=[sample for ]
+        
+        
         final_sample_list=[]
         for n in range(self.n_inputs):
             sample=split_sample_list[n]
@@ -593,6 +944,7 @@ class FissionUNet2DConditionModel(UNet2DConditionModel):
             sample=self.conv_out_list[n](sample)
             final_sample_list.append(sample)
             
+        
         return final_sample_list
         
 
@@ -680,7 +1032,7 @@ if __name__=="__main__":
     
     #p.forward(torch.randn((batch_size,4,64,64)),timestep,encoder_hidden_states=None)
     
-    p.fake_forward(torch.randn((batch_size,4,64,64)),timestep,)
+    #p.fake_forward(torch.randn((batch_size,4,64,64)),timestep,)
     
     for u,up_block in enumerate(p.up_blocks):
         break
@@ -692,7 +1044,7 @@ if __name__=="__main__":
     
     #exit(0)
     
-    n_inputs=1
+    n_inputs=2
     total_up_blocks=4
     total_mid_blocks=1
     num_layers=2
@@ -738,4 +1090,6 @@ if __name__=="__main__":
             print("  |-",resnet.in_channels) 
             print("  |-",resnet.out_channels) 
     print("my turn!")
-    unet.forward([torch.randn((batch_size,4,64,64)) for _ in range(n_inputs)] ,timestep_list)
+    result=unet.forward([torch.randn((batch_size,4,64,64)) for _ in range(n_inputs)] ,timestep_list)
+    print(type(result))
+    print(result[0].size())

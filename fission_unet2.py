@@ -4,6 +4,7 @@ from diffusers.models.resnet import ResnetBlock2D
 from diffusers.models.activations import get_activation
 import torch
 from typing import Optional,List,Tuple,Dict,Any,Union
+from transformers import CLIPTokenizer, CLIPTextModel
 from diffusers.models.embeddings import (
     GaussianFourierProjection,
     GLIGENTextBoundingboxProjection,
@@ -29,6 +30,7 @@ class PartialUNet2DConditionModel(UNet2DConditionModel):
         sample: torch.Tensor,
         timestep: Union[torch.Tensor, float, int],
         encoder_hidden_states: torch.Tensor,
+        emb:Optional[torch.Tensor]=None,
         class_labels: Optional[torch.Tensor] = None,
         timestep_cond: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
@@ -80,28 +82,29 @@ class PartialUNet2DConditionModel(UNet2DConditionModel):
         if self.config.center_input_sample:
             sample = 2 * sample - 1.0
 
-        # 1. time
-        t_emb = self.get_time_embed(sample=sample, timestep=timestep)
-        emb = self.time_embedding(t_emb, timestep_cond)
+        if emb is None:
+            # 1. time
+            t_emb = self.get_time_embed(sample=sample, timestep=timestep)
+            emb = self.time_embedding(t_emb, timestep_cond)
 
-        class_emb = self.get_class_embed(sample=sample, class_labels=class_labels)
-        if class_emb is not None:
-            if self.config.class_embeddings_concat:
-                emb = torch.cat([emb, class_emb], dim=-1)
-            else:
-                emb = emb + class_emb
+            class_emb = self.get_class_embed(sample=sample, class_labels=class_labels)
+            if class_emb is not None:
+                if self.config.class_embeddings_concat:
+                    emb = torch.cat([emb, class_emb], dim=-1)
+                else:
+                    emb = emb + class_emb
 
-        aug_emb = self.get_aug_embed(
-            emb=emb, encoder_hidden_states=encoder_hidden_states, added_cond_kwargs=added_cond_kwargs
-        )
-        if self.config.addition_embed_type == "image_hint":
-            aug_emb, hint = aug_emb
-            sample = torch.cat([sample, hint], dim=1)
+            aug_emb = self.get_aug_embed(
+                emb=emb, encoder_hidden_states=encoder_hidden_states, added_cond_kwargs=added_cond_kwargs
+            )
+            if self.config.addition_embed_type == "image_hint":
+                aug_emb, hint = aug_emb
+                sample = torch.cat([sample, hint], dim=1)
 
-        emb = emb + aug_emb if aug_emb is not None else emb
+            emb = emb + aug_emb if aug_emb is not None else emb
 
-        if self.time_embed_act is not None:
-            emb = self.time_embed_act(emb)
+            if self.time_embed_act is not None:
+                emb = self.time_embed_act(emb)
 
         encoder_hidden_states = self.process_encoder_hidden_states(
             encoder_hidden_states=encoder_hidden_states, added_cond_kwargs=added_cond_kwargs
@@ -288,6 +291,7 @@ class PartialUNet2DConditionModel(UNet2DConditionModel):
                 sample: torch.Tensor,
         timestep: Union[torch.Tensor, float, int],
         encoder_hidden_states: torch.Tensor,
+        emb:Optional[torch.Tensor]=None,
         class_labels: Optional[torch.Tensor] = None,
         timestep_cond: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
@@ -355,6 +359,26 @@ class PartialUNet2DConditionModel(UNet2DConditionModel):
         return sample
     
 class FissionUNet2DConditionModel(torch.nn.Module):
+    @classmethod
+    def from_pretrained(cls,path:str,
+                        shared_layer_type:str,
+                 n_mid_blocks:int,
+                        shared_down_block_types: Tuple[str]=("CrossAttnDownBlock2D","CrossAttnDownBlock2D",),
+                 shared_mid_block_type: Optional[str] = "UNetMidBlock2DCrossAttn",
+                 shared_up_block_types: Tuple[str] = ("UpBlock2D", "CrossAttnUpBlock2D",),
+                 shared_block_out_channels: Tuple[int] = (1280, 1280),**kwargs):
+        
+        model=cls(n_inputs=n_inputs,
+                  shared_layer_type=shared_layer_type,
+                  n_mid_blocks=n_mid_blocks,
+                  shared_mid_block_type=shared_mid_block_type,
+                  shared_up_block_types=shared_up_block_types,
+                  shared_down_block_types=shared_down_block_types,
+                  shared_block_out_channels=shared_block_out_channels,
+                  **kwargs)
+        
+        model.partial_list=[PartialUNet2DConditionModel.from_pretrained(path,subfolder="unet") for _ in range(n_inputs)] 
+    
     def __init__(self, n_inputs:int, 
                  shared_layer_type:str,
                  n_mid_blocks:int,
@@ -381,7 +405,8 @@ class FissionUNet2DConditionModel(torch.nn.Module):
                  upcast_attention = False, resnet_time_scale_shift = "default", resnet_skip_time_act = False, resnet_out_scale_factor = 1, time_embedding_type = "positional", 
                  time_embedding_dim = None, time_embedding_act_fn = None, timestep_post_act = None, time_cond_proj_dim = None, conv_in_kernel = 3, 
                  conv_out_kernel = 3, projection_class_embeddings_input_dim = None, attention_type = "default", class_embeddings_concat = False, 
-                 mid_block_only_cross_attention = None, cross_attention_norm = None, addition_embed_type_num_heads = 64):
+                 mid_block_only_cross_attention = None, cross_attention_norm = None, addition_embed_type_num_heads = 64,max_position_embeddings:int=77,
+                 tokenizer:CLIPTokenizer=None, text_model:CLIPTextModel=None):
         super().__init__()
         self.partial_list=torch.nn.ModuleList([PartialUNet2DConditionModel(sample_size=sample_size,
             in_channels=in_channels,
@@ -434,6 +459,10 @@ class FissionUNet2DConditionModel(torch.nn.Module):
         ) for _ in range(n_inputs)])
         self.n_inputs=n_inputs
         self.shared_layer_type=shared_layer_type
+        self.cross_attention_dim=cross_attention_dim
+        self.max_position_embeddings=max_position_embeddings
+        self.tokenizer=tokenizer
+        self.text_model=text_model
         
         shared_block_in_channels=block_out_channels[-1]*n_inputs
         
@@ -445,8 +474,16 @@ class FissionUNet2DConditionModel(torch.nn.Module):
             time_embedding_dim=time_embedding_dim,
         )
         
+        self.time_embedding = TimestepEmbedding(
+            timestep_input_dim,
+            time_embed_dim,
+            act_fn=act_fn,
+            post_act_fn=timestep_post_act,
+            cond_proj_dim=time_cond_proj_dim,
+        )
+        
         if shared_layer_type==UNET:
-            self.shared_blocks=UNet2DConditionModel(sample_size=sample_size,
+            self.shared_blocks=PartialUNet2DConditionModel(sample_size=sample_size,
             in_channels=shared_block_in_channels,
             out_channels=shared_block_in_channels,
             center_input_sample=center_input_sample,
@@ -516,14 +553,38 @@ class FissionUNet2DConditionModel(torch.nn.Module):
             )
             
         
-        
+    def _set_time_proj(
+        self,
+        time_embedding_type: str,
+        block_out_channels: int,
+        flip_sin_to_cos: bool,
+        freq_shift: float,
+        time_embedding_dim: int,
+    ) -> Tuple[int, int]:
+        if time_embedding_type == "fourier":
+            time_embed_dim = time_embedding_dim or block_out_channels[0] * 2
+            if time_embed_dim % 2 != 0:
+                raise ValueError(f"`time_embed_dim` should be divisible by 2, but is {time_embed_dim}.")
+            self.time_proj = GaussianFourierProjection(
+                time_embed_dim // 2, set_W_to_weight=False, log=False, flip_sin_to_cos=flip_sin_to_cos
+            )
+            timestep_input_dim = time_embed_dim
+        elif time_embedding_type == "positional":
+            time_embed_dim = time_embedding_dim or block_out_channels[0] * 4
+
+            self.time_proj = Timesteps(block_out_channels[0], flip_sin_to_cos, freq_shift)
+            timestep_input_dim = block_out_channels[0]
+        else:
+            raise ValueError(
+                f"{time_embedding_type} does not exist. Please make sure to use one of `fourier` or `positional`."
+            )
+
+        return time_embed_dim, timestep_input_dim
+    
     
     def shared_forward(self,sample_list,
-        timestep: Union[torch.Tensor, float, int],
         encoder_hidden_states: torch.Tensor,
         emb: torch.Tensor,
-        is_controlnet:bool,
-        is_adapter:bool,
         class_labels: Optional[torch.Tensor] = None,
         timestep_cond: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
@@ -536,6 +597,9 @@ class FissionUNet2DConditionModel(torch.nn.Module):
         return_dict: bool = True,):
         
         sample=torch.cat(sample_list,dim=1)
+        
+            
+        
         
         if self.shared_layer_type == UNET:
             sample=self.shared_blocks.forward(sample,
@@ -552,28 +616,29 @@ class FissionUNet2DConditionModel(torch.nn.Module):
                 return_dict=return_dict,).sample[0]
             
         elif self.shared_layer_type==MID_BLOCK:
+            #t_emb = self.get_time_embed(sample=sample, timestep=timestep)
+            
             for _ in range(self.n_mid_blocks):
-                sample=self.shared_blocks[0].forward(
-                    sample,timestep,encoder_hidden_states=encoder_hidden_states,
-                    emb=emb,
-                    class_labels=class_labels,
-                    timestep_cond=timestep_cond,
-                    attention_mask=attention_mask,
-                    cross_attention_kwargs=cross_attention_kwargs,
-                    added_cond_kwargs=added_cond_kwargs,
-                    down_block_additional_residuals=down_block_additional_residuals,
-                    mid_block_additional_residual=mid_block_additional_residual,
-                    down_intrablock_additional_residuals=down_intrablock_additional_residuals,
-                    encoder_attention_mask=encoder_attention_mask,
-                    return_dict=return_dict,
-                )
+                if hasattr(self.shared_blocks[0], "has_cross_attention") and self.shared_blocks[0].has_cross_attention:
+                    sample=self.shared_blocks[0].forward(
+                        sample,
+                        emb,
+                        encoder_hidden_states=encoder_hidden_states,
+                        attention_mask=attention_mask,
+                        cross_attention_kwargs=cross_attention_kwargs,
+                        encoder_attention_mask=encoder_attention_mask,
+                    )
+                else:
+                    sample = self.shared_blocks[0].forward(sample, emb)
         
         return sample.chunk(self.n_inputs,dim=1)
         
         
     def forward(self,sample_list: List[torch.Tensor],
         timestep_list: List[Union[torch.Tensor, float, int]],
-        encoder_hidden_states_list: List[torch.Tensor],
+        str_list:List[List[str]]=None,
+        token_id_list:List[torch.Tensor]=None,
+        encoder_hidden_states_list: List[torch.Tensor]=None,
         class_labels: Optional[torch.Tensor] = None,
         timestep_cond: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
@@ -585,8 +650,46 @@ class FissionUNet2DConditionModel(torch.nn.Module):
         encoder_attention_mask: Optional[torch.Tensor] = None,
         return_dict: bool = True,):
         new_sample_list=[]
-        emb_list=[]
         down_block_res_samples_list=[]
+        
+        emb_list=[self.time_embedding(self.get_time_embed(sample=sample, timestep=timestep), timestep_cond) for timestep in timestep_list]
+        emb=emb_list[0]
+        for e in emb_list[1:]:
+            emb=emb+e
+            
+        batch_size=sample_list[0].size()[0]
+        
+        if encoder_hidden_states_list is None and shared_encoder_hidden_states is None:
+            
+                
+            if token_id_list is not None and self.text_model is not None:
+                encoder_hidden_states_list=[self.text_model(input_ids).last_hidden_state for input_ids in token_id_list ]
+                step=10 #concat the first n=step tokens of each token id sequence
+                shared_encoder_hidden_states=self.text_model(torch.cat([input_ids[:,0:step,:] for i,input_ids in enumerate(token_id_list) ],dim=1)).last_hidden_state
+            elif str_list is not None and self.tokenizer is not None and self.text_model is not None:
+                
+                #assume str list is (n x b)
+                batched_str_list=[]
+                for i in range(len(str_list[0])):
+                    s=" "
+                    for j in range(len(str_list)):
+                        s+=batched_str_list[j][i]
+                    batched_str_list.append(s)
+                
+                shared_encoder_hidden_states(self.text_model(self.tokenizer(batched_str_list,padding="max_length",
+                    max_length=tokenizer.model_max_length, return_tensors="pt",)))
+                token_id_list=self.tokenizer([s for s in str_list],padding="max_length",
+                    max_length=tokenizer.model_max_length, return_tensors="pt",)
+                encoder_hidden_states_list=[self.text_model(input_ids).last_hidden_state for input_ids in token_id_list ]
+            else:
+                encoder_hidden_states_list=[torch.zeros((batch_size,self.max_position_embeddings,self.cross_attention_dim))]
+                shared_encoder_hidden_states=torch.zeros((batch_size,self.max_position_embeddings,self.cross_attention_dim))
+                
+            print('len(encoder_hidden_states_list)',len(encoder_hidden_states_list))
+            print('encoder_hidden_states_list[0].size()',encoder_hidden_states_list[0].size())
+            print("shared_encoder_hidden_states size",shared_encoder_hidden_states.size())
+
+            
         for n,(sample,timestep,encoder_hidden_states) in enumerate(zip(sample_list,timestep_list,encoder_hidden_states_list)):
             sample,emb,down_block_res_samples,is_controlnet,is_adapter,lora_scale,forward_upsample_size,upsample_size=self.partial_list[n].forward_down(
                 sample=sample,
@@ -605,7 +708,7 @@ class FissionUNet2DConditionModel(torch.nn.Module):
             )
             print('forward_down',sample.size())
             new_sample_list.append(sample)
-        sample=self.shared_layers(new_sample_list, timestep, encoder_hidden_states=sum(encoder_hidden_states_list),
+        sample=self.shared_forward(new_sample_list, timestep_list, encoder_hidden_states=encoder_hidden_states_list[0],
                                   emb=emb,is_controlnet=is_controlnet,is_adapter=is_adapter,
                                   class_labels=class_labels,
                                     timestep_cond=timestep_cond,
@@ -661,7 +764,16 @@ if __name__=="__main__":
     
     
     for shared_layer_type in [UNET,MID_BLOCK]:
-        fission=FissionUNet2DConditionModel(n_inputs,norm_num_groups=4,shared_layer_type=shared_layer_type)
+        print(shared_layer_type)
+        fission=FissionUNet2DConditionModel(n_inputs,norm_num_groups=4,shared_layer_type=shared_layer_type,n_mid_blocks=2)
+        output=fission.forward(sample_list,timestep_list,encoder_hidden_states_list)
+        
+        for o in output:
+            print(o.size())
+            
+        fission=FissionUNet2DConditionModel.from_pretrained("SimianLuo/LCM_Dreamshaper_v7",shared_layer_type=shared_layer_type,
+                                                            n_mid_blocks=2)
+        
         output=fission.forward(sample_list,timestep_list,encoder_hidden_states_list)
         
         for o in output:

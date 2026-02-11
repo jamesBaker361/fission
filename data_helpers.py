@@ -9,6 +9,8 @@ from typing import Tuple
 import kagglehub
 import torchvision.transforms as T
 import csv
+import torch
+import json
 
 
 
@@ -50,10 +52,11 @@ class ShapeNetImageData(Dataset):
         return output
     
 class ShapeNetImageDataPaired(Dataset):
-    def __init__(self,render_dir:str,dim:Tuple[int],limit:int=-1):
+    def __init__(self,render_dir:str,dim:Tuple[int],limit:int=-1,partition:str="training",test_frac=0.1):
         super().__init__()
         self.render_dir=render_dir
         self.dim=dim
+        self.partition=partition
         metadata_path=os.path.join(render_dir,"metadata.csv")
         self.metadata=[]
         self.image_processor=VaeImageProcessor()
@@ -69,10 +72,24 @@ class ShapeNetImageDataPaired(Dataset):
                     self.metadata_dict[key]=[]
                 self.metadata_dict[key].append(i)
         self.index_pair_list=[]
+        keys=[k for k in self.metadata_dict.keys()]
+        n_test=int(test_frac*len(keys))
+        
+        
+        if partition =="training" and test_frac>0:
+            keys=keys[n_test:]
+        else:
+            keys=keys[:n_test]
+            
+        self.keys=keys
+        
+        print(f"total {len(keys)} keys ")
+        
         for key,value in self.metadata_dict.items():
-            pairs= list(itertools.combinations(value, 2))
-            #print("pairs",pairs)
-            self.index_pair_list+=pairs
+            if key in keys:
+                pairs= list(itertools.combinations(value, 2))
+                #print("pairs",pairs)
+                self.index_pair_list+=pairs
     
     def __len__(self):
         return len(self.index_pair_list)
@@ -107,12 +124,12 @@ class ShapeNetImageDataPaired(Dataset):
         location=[l0-l1 for l0,l1 in zip(location_0,location_1)]
         rotation=[r0-r1 for r0,r1 in zip(rotation_0,rotation_1)]
         
-        output["location"]=location
-        output["rotation"]=rotation
-        output["location_0"]=location_0
-        output["location_1"]=location_1
-        output["rotation_0"]=rotation_0
-        output["rotation_1"]=rotation_1
+        output["location"]=torch.tensor(location)
+        output["rotation"]=torch.tensor(rotation)
+        output["location_0"]=torch.tensor(location_0)
+        output["location_1"]=torch.tensor(location_1)
+        output["rotation_0"]=torch.tensor(rotation_0)
+        output["rotation_1"]=torch.tensor(rotation_1)
         
         return output
         
@@ -155,9 +172,14 @@ class VirtualTryOnData(Dataset):
         output["segmentation"]=self.transforms(
             self.image_processor.preprocess(Image.open(os.path.join(self.path,self.partition,"image-parse-v3",file.replace("jpg","png"))).convert('RGB').resize(self.dim) )[0]
         )
+        output["agnostic"]=self.transforms(
+            self.image_processor.preprocess(Image.open(os.path.join(self.path,self.partition,"agnostic-v3.2",file)).convert('RGB').resize(self.dim) )[0]
+        )
         #output["segmentation"]=self.image_processor.preprocess(Image.open(os.path.join(self.path,self.partition,"image-parse-v3",file.replace("jpg","png"))).convert('RGB').resize(self.dim) )[0]
         
         return output
+    
+
         
         
 class TextImageWikiData(Dataset):
@@ -190,6 +212,75 @@ class TextImageWikiData(Dataset):
             
             
         }
+        
+class PersonaDataset(Dataset):
+    def __init__(self,dim:Tuple[int],limit:int=-1):
+        super().__init__()
+        self.image_processor=VaeImageProcessor()
+        self.tokenizer=CLIPTokenizer.from_pretrained("SimianLuo/LCM_Dreamshaper_v7",subfolder="tokenizer")
+        self.dim=dim
+        with open(os.path.join("pcs_dataset","info.json"),"r") as file:
+            info=json.load(file)
+            
+        subject_with_cls=info["subject"]["subject_with_cls"] #dict
+        live_subjects=info["subject"]["live_subjects"]
+        prompt_object=info["subject"]["prompt_object"]
+        prompt_live=info["subject"]["prompt_live"]
+        
+        id_with_gender=info["face"]["id_with_gender"] #dict
+        prompt_accesory=info["face"]["prompt_accesory"]
+        prompt_context=info["face"]["prompt_context"]
+        prompt_action=info["face"]["prompt_action"]
+        prompt_style=info["face"]["prompt_style"]
+        
+        face_prompt_list=prompt_accesory+prompt_context+prompt_action+prompt_style
+        
+        self.caption_list=[]
+        self.image_path_list=[]
+        
+        for key,name in subject_with_cls.items():
+            img_dir_path=os.path.join("pcs_dataset","subjects",key)
+            for x in range(10):
+                img_path=os.path.join(img_dir_path,f"0{x}.jpg")
+                if os.path.exists(img_path):
+                    for prompt in prompt_object:
+                        self.caption_list.append(prompt.format(name, " "))
+                        self.image_path_list.append(img_path)
+                
+        for name in live_subjects:
+            img_dir_path=os.path.join("pcs_dataset","subjects",name)
+            for x in range(10):
+                img_path=os.path.join(img_dir_path,f"0{x}.jpg")
+                if os.path.exists(img_path):
+                    for prompt in prompt_live:
+                        self.caption_list.append(prompt.format(name, " "))
+                        self.image_path_list.append(img_path)
+                        
+        for key,name in id_with_gender.items():
+            img_path=os.path.join("pcs_dataset","face",key,"face.jpg")
+            for prompt in face_prompt_list:
+                self.caption_list.append(prompt.format(name, " "))
+                self.image_path_list.append(img_path)
+                
+        self.caption_list=self.caption_list[:limit]
+        self.image_path_list=self.image_path_list[:limit]
+        
+    def __len__(self):
+        return len(self.caption_list)
+    
+    
+    def __getitem__(self, index):
+        text=self.caption_list[index]
+        return {
+             "image":self.image_processor.preprocess(Image.open(self.path_list[index]).convert("RGB").resize(self.dim))[0],
+            "text":text,
+            "input_ids":self.tokenizer(text,padding="max_length",max_length=self.tokenizer.model_max_length, return_tensors="pt",).input_ids,
+            
+        }
+            
+                
+        
+        
 
     
 if __name__=='__main__':
@@ -203,6 +294,13 @@ if __name__=='__main__':
         print(dataset_class,"len",len(data))
         for batch in data:
             break
+        
+    for dataset_class in [PersonaDataset]:
+        data=dataset_class(dim=(64,64),limit=10)
+        print(dataset_class,"len",len(data))
+        for batch in data:
+            break
+        
     
     
     print(batch)

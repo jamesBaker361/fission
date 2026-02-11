@@ -388,30 +388,35 @@ class PartialUNet2DConditionModel(MetadataUNet2DConditionModel):
         
         return sample
     
-    def get_down_block_res_sample_dims(self,dim:int,max_position_embeddings:int,cross_attention_dim:int):
+    def get_down_block_res_sample_dims(self,dim:Tuple[int],max_position_embeddings:int,cross_attention_dim:int,device:torch.DeviceObjType):
         if getattr(self, "down_block_res_sample_dims_dict",None) is None:
             self.down_block_res_sample_dims_dict={}
         
         if dim in self.down_block_res_sample_dims_dict:
             return self.down_block_res_sample_dims_dict[dim]
         
-        null_sample=torch.zeros((1,4,dim,dim))
-        null_timestep=torch.zeros((1))
-        null_encoder_hidden_states=torch.zeros((1,max_position_embeddings,cross_attention_dim))
+        null_sample=torch.zeros((1,4,dim[0],dim[1]),device=device)
+        null_timestep=torch.zeros((1),device=device)
+        null_encoder_hidden_states=torch.zeros((1,max_position_embeddings,cross_attention_dim),device=device)
+        null_metadata=torch.zeros((1,self.num_metadata))
+        '''if self.use_metadata and self.metadata_proj:
+            null_metadata=torch.zeros((1,self.metadata_proj_dim))'''
+            
+        null_metadata=null_metadata.to(device)
         
         sample,emb,down_block_res_samples,is_controlnet,is_adapter,lora_scale,forward_upsample_size,upsample_size=self.forward_down(
-            null_sample,null_timestep,null_encoder_hidden_states)
+            null_sample,null_timestep,null_encoder_hidden_states,metadata=null_metadata)
         
         result=[t.size()[1:] for t in down_block_res_samples]
         
         self.down_block_res_sample_dims_dict[dim]=result
         return result
     
-    def get_null_down_block_res_sample(self,dim:int,max_position_embeddings:int,cross_attention_dim:int,batch_size:int):
-        dim_list=self.get_down_block_res_sample_dims(dim,max_position_embeddings,cross_attention_dim)
+    def get_null_down_block_res_sample(self,dim:Tuple[int],max_position_embeddings:int,cross_attention_dim:int,batch_size:int,device:torch.DeviceObjType):
+        dim_list=self.get_down_block_res_sample_dims(dim,max_position_embeddings,cross_attention_dim,device)
         down_block_res_samples=()
         for d in dim_list:
-            zero=torch.zeros((batch_size,*d))
+            zero=torch.zeros((batch_size,*d),device=device)
             down_block_res_samples+=(zero,)
             
         return down_block_res_samples
@@ -436,7 +441,8 @@ class FissionUNet2DConditionModel(ModelMixin,MetadataMixin,ConfigMixin):
                         shared_down_block_types: Tuple[str]=("CrossAttnDownBlock2D","CrossAttnDownBlock2D",),
                  shared_mid_block_type: Optional[str] = "UNetMidBlock2DCrossAttn",
                  shared_up_block_types: Tuple[str] = ("UpBlock2D", "CrossAttnUpBlock2D",),
-                 shared_block_out_channels: Tuple[int] = (1280, 1280),**kwargs):
+                 shared_block_out_channels: Tuple[int] = (1280, 1280),
+                 **kwargs):
         
         model=cls(n_inputs=n_inputs,
                   shared_layer_type=shared_layer_type,
@@ -494,7 +500,8 @@ class FissionUNet2DConditionModel(ModelMixin,MetadataMixin,ConfigMixin):
                  conv_out_kernel = 3, projection_class_embeddings_input_dim = None, attention_type = "default", class_embeddings_concat = False, 
                  mid_block_only_cross_attention = None, cross_attention_norm = None, addition_embed_type_num_heads = 64,max_position_embeddings:int=77,
                  partial_list:torch.nn.ModuleList=None,
-                 tokenizer:CLIPTokenizer=None, text_model:CLIPTextModel=None):
+                 tokenizer:CLIPTokenizer=None, text_model:CLIPTextModel=None,
+                 ):
         super().__init__()
         if partial_list is None:
             self.partial_list=torch.nn.ModuleList([PartialUNet2DConditionModel(sample_size=sample_size,
@@ -834,6 +841,7 @@ class FissionUNet2DConditionModel(ModelMixin,MetadataMixin,ConfigMixin):
         metadata:List[Union[torch.Tensor, float, int]]=None,
         partial_metadata_list:List[List[Union[torch.Tensor, float, int]]]=None,
         zero_list:List[int]=[],
+        left_residuals:bool=False,
         ):
         new_sample_list=[]
         down_block_res_samples_list=[]
@@ -864,10 +872,11 @@ class FissionUNet2DConditionModel(ModelMixin,MetadataMixin,ConfigMixin):
                 emb = emb + md_emb  # (N, D)
             
         batch_size=sample_list[0].size()[0]
-        dim=sample_list[0].size()[-1]
+        dim=(sample_list[0].size()[-2],sample_list[0].size()[-1])
+        device,dtype=self.get_device_dtype()
         
         if encoder_hidden_states_list is None and shared_encoder_hidden_states is None:
-            device,dtype=self.get_device_dtype()
+            
             
                 
             if token_id_list is not None and self.text_model is not None:
@@ -901,7 +910,9 @@ class FissionUNet2DConditionModel(ModelMixin,MetadataMixin,ConfigMixin):
         if len(encoder_hidden_states_list)==0:
             encoder_hidden_states_list=[torch.zeros((batch_size,self.max_position_embeddings,self.cross_attention_dim)).to(device,dtype) for _ in range(self.n_inputs)]
                         
-        
+        #print('encoder_hidden_states_list',encoder_hidden_states_list[0].size())
+        #print("encoer shared",shared_encoder_hidden_states.size())
+        #print("sample_list",sample_list[0].size())
             
         for n,(sample,timestep,encoder_hidden_states,) in enumerate(zip(sample_list,timestep_list,encoder_hidden_states_list)):
             if partial_metadata_list is not None and partial_metadata_list is not []:
@@ -942,16 +953,19 @@ class FissionUNet2DConditionModel(ModelMixin,MetadataMixin,ConfigMixin):
                                     return_dict=return_dict,)
         
         final_sample_list=[]
-        for data_list,name in zip(
+        '''for data_list,name in zip(
             [timestep_list,encoder_hidden_states_list,down_block_res_samples_list,emb_list,sample_list],
             ['timestep_list','encoder_hidden_states_list','down_block_res_samples_list','emb_list','sample_list']
         ):
-            print(name,len(data_list))
+            print(name,len(data_list))'''
+        if left_residuals:
+            for j in range(1,len(down_block_res_samples_list)):
+                down_block_res_samples_list[j]=down_block_res_samples_list[0]
         for n,(timestep,encoder_hidden_states,down_block_res_samples,emb,sample) in enumerate(
                 zip(timestep_list,encoder_hidden_states_list,down_block_res_samples_list,emb_list,sample_list)):
             if n in zero_list:
                 
-                down_block_res_samples=self.partial_list[n].get_null_down_block_res_sample(dim,self.tokenizer.model_max_length,self.cross_attention_dim,batch_size) #(self,dim:int,max_position_embeddings:int,cross_attention_dim:int,batch_size:int):
+                down_block_res_samples=self.partial_list[n].get_null_down_block_res_sample(dim,self.tokenizer.model_max_length,self.cross_attention_dim,batch_size,device) #(self,dim:int,max_position_embeddings:int,cross_attention_dim:int,batch_size:int):
             final_sample=self.partial_list[n].forward_up(
                 sample=sample,
                 timestep=timestep,

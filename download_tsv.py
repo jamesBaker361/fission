@@ -7,7 +7,7 @@ import random
 import subprocess
 import requests
 from experiment_helpers.gpu_details import print_details
-import PIL
+from PIL import Image
 
 from urllib.parse import quote
 from requests.adapters import HTTPAdapter
@@ -76,6 +76,7 @@ for partition_name in partitions:
             found_set=set(lines)
             count=len(found_set)
     print(partition_name," count = ",count)
+    print("already found ",len(found_set))
     caption_file_path=os.path.join(root,partition_name,'captions.csv')
     with open(found_file_path,"a") as found_file:
         
@@ -86,8 +87,7 @@ for partition_name in partitions:
                     with gzip.open(gz_path, 'rt') as tar:
                         rd = csv.DictReader(tar, delimiter="\t", quotechar='"')
                         for k,row in enumerate(rd):
-                            if k >10:
-                                break
+
                             if row['language']=='en':
                                 
                                 text=row['caption_reference_description']
@@ -112,7 +112,7 @@ for partition_name in partitions:
                                         
                                     
                                         
-                                        PIL.Image.open(image_url)
+                                        Image.open(image_url)
 
                                     except Exception as e:
                                         print("FAILED:", image_url)

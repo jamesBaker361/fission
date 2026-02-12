@@ -1,3 +1,6 @@
 [submodule "experiment_helpers"]
 	path = experiment_helpers
 	url = https://github.com/jamesBaker361/experiment_helpers.git
+[submodule "threestudio"]
+	path = threestudio
+	url = https://github.com/threestudio-project/threestudio.git

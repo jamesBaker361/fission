@@ -293,6 +293,7 @@ class TestFission(unittest.TestCase):
         loss.backward()
         optimizer.step()
         
+    @torch.no_grad()
     def test_mixin(self):
         # sbatch --err=slurm_chip/test_mixin.err --out=slurm_chip/test_mixin.out runpycpu_chip.sh test_fission_unet.py TestFission.test_mixin
         
@@ -311,7 +312,7 @@ class TestFission(unittest.TestCase):
         
         save_dir="test_pretreining"
         os.makedirs(save_dir,exist_ok=True)
-        fission.save_pretrained(save_dir)
+        fission.save_pretrained_custom(save_dir)
         
         fission=FissionUNet2DConditionModel(n_inputs,shared_layer_type,2).to(device)
         
@@ -319,7 +320,7 @@ class TestFission(unittest.TestCase):
         
         self.assertFalse(param.sum()==0)
         
-        fission=FissionUNet2DConditionModel.from_pretrained(save_dir)
+        fission=FissionUNet2DConditionModel.from_pretrained_custom(save_dir)
         name,param=[pair for pair in fission.named_parameters()][0]
         
         self.assertTrue(param.sum()==0)

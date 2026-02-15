@@ -4,7 +4,7 @@ from experiment_helpers.gpu_details import print_details
 from fission_unet2 import FissionUNet2DConditionModel,MID_BLOCK
 from peft import LoraConfig
 from diffusers import AutoencoderKL
-from data_helpers import VirtualTryOnData,TextImageWikiData,ShapeNetImageDataPaired
+from data_helpers import VirtualTryOnData,TextImageWikiData,ShapeNetImageDataPaired,LaionDataset,PersonaDataset
 from torch.utils.data import random_split
 from experiment_helpers.loop_decorator import optimization_loop
 from experiment_helpers.saving_helpers import CONFIG_NAME
@@ -12,7 +12,7 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 import torch
 from experiment_helpers.image_helpers import concat_images_horizontally
 from diffusers.image_processor import VaeImageProcessor
-from transformers import CLIPTextModel,CLIPTokenizer
+from transformers import CLIPTextModel,CLIPTokenizer,CLIPProcessor,CLIPModel
 from typing import List
 import os
 import wandb
@@ -25,6 +25,7 @@ from torchmetrics.image import PeakSignalNoiseRatio
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image.kid import KernelInceptionDistance
+from torchmetrics.multimodal.clip_score import CLIPScore
 
 
 VELOCITY="v_prediction"
@@ -49,6 +50,8 @@ parser.add_argument("--partial_metadata_proj",action="store_true",help="whether 
 parser.add_argument("--partial_metadata_proj_dim",type=int,default=4,help="project to this dim before getting embedding")
 parser.add_argument("--zero_fraction",default=0.0,type=float,help="default fraction of zero-ing for the right unet")
 parser.add_argument("--left_residual_fraction",default=0.0,type=float,help="default fraction of using left unet residuals for the right unet")
+parser.add_argument("--zero_inference",action="store_true")
+parser.add_argument("--left_residual_inference",action="store_true")
 parser.add_argument("--n_mid_blocks",type=int,default=2, help="n mid blocks")
 parser.add_argument("--height",type=int,default=256)
 parser.add_argument("--width",type=int,default=256)
@@ -83,11 +86,16 @@ def inference(args:ArgumentParser,
     batch_size=left_input.size()[0]
     left_timesteps=torch.tensor([1 for _ in range(batch_size)],device=device).long()
     right_input=torch.randn_like(left_input,device=device)
+    zero_list=[]
+    if args.zero_inference:
+        zero_list=[1]
+    left_residuals=args.left_residual_inference
     for t,right_timesteps in enumerate(scheduler.timesteps):
         predicted=fission.forward([left_input,right_input],[left_timesteps,right_timesteps],
                                           encoder_hidden_states_list=encoder_hidden_states_list,
                                           partial_metadata_list=partial_metadata_list,
-                                          shared_encoder_hidden_states=shared_encoder_hidden_states,return_dict=False)
+                                          shared_encoder_hidden_states=shared_encoder_hidden_states,
+                                          return_dict=False,zero_list=zero_list,left_residuals=left_residuals)
         right_output=predicted[1]
         right_input=scheduler.step(right_output,right_timesteps,right_input).prev_sample
         
@@ -166,17 +174,19 @@ def main(args):
     
     #data
     dim=(args.height,args.width)
+    generator=torch.Generator()
+    generator.manual_seed(123)
     if args.task in (FASHION,FASHION_SEG):
         train_dataset=VirtualTryOnData("train",dim,args.limit)
         val_dataset,train_dataset=random_split(train_dataset,[0.1,0.9])
         test_dataset=VirtualTryOnData("test",dim,args.limit)
     elif args.task ==T2I:
-        train_dataset=TextImageWikiData("train",dim,args.limit)
-        val_dataset=TextImageWikiData("val",dim,args.limit)
-        test_dataset=TextImageWikiData("test",dim,args.limit)
+        train_dataset=LaionDataset(dim,args.limit)
+        val_dataset,train_dataset=random_split(train_dataset,[0.1,0.9])
+        test_dataset=PersonaDataset(dim,args.limit)
     elif args.task==THREE_D:
         train_dataset=ShapeNetImageDataPaired("shapenet_renders",dim,args.limit)
-        test_dataset,val_dataset,train_dataset=random_split(train_dataset,[0.1,0.1,0.8])
+        test_dataset,val_dataset,train_dataset=random_split(train_dataset,[0.1,0.1,0.8],generator=generator)
         
     train_loader=torch.utils.data.DataLoader(train_dataset,batch_size=args.batch_size,shuffle=True)
     test_loader=torch.utils.data.DataLoader(test_dataset,batch_size=args.batch_size,shuffle=False)
@@ -197,11 +207,11 @@ def main(args):
         "start_epoch":1
         }
     }
-    config_path=os.path.join(save_path,CONFIG_NAME)
+    config_path=os.path.join(save_path,"training_config.json")
     
     def save(epoch:int):
         if  not args.dont_save:
-            fission.save_pretrained(save_path)
+            fission.save_pretrained_custom(save_path)
             config_dict["train"]["start_epoch"]=epoch
             with open(config_path,"w") as config_file:
                 json.dump(config_dict,config_file, indent=4)
@@ -216,7 +226,7 @@ def main(args):
         if "train" in data and "start_epoch" in data["train"]:
             start_epoch = data["train"]["start_epoch"]
     if len(os.listdir(save_path))!=0:
-        fission=FissionUNet2DConditionModel.from_pretrained(save_path)
+        fission=FissionUNet2DConditionModel.from_pretrained_custom(save_path)
 
     
     ssim_metric=StructuralSimilarityIndexMeasure(data_range=(-1.0,1.0)).to(device)
@@ -224,6 +234,9 @@ def main(args):
     lpips_metric=LearnedPerceptualImagePatchSimilarity(net_type='squeeze').to(device)
     fid_metric=FrechetInceptionDistance(feature=64,normalize=False).to(device) #expects images in [0,255]
     kid_metric = KernelInceptionDistance(subset_size=50).to(device)
+    clip_metric=CLIPScore(model_name_or_path="openai/clip-vit-base-patch16").to(device)
+    clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
+    clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
     
         
     test_metric_dict={
@@ -368,8 +381,10 @@ def main(args):
                                              shared_encoder_hidden_states,encoder_hidden_states_list,partial_metadata_list)
             loss=F.mse_loss(predicted_right_output,right_src).mean()
             count=misc_dict["b"]*args.batch_size
-            actual_right_pil=image_processor.postprocess( vae.decode(right_src/scale,return_dict=False)[0])
-            predicted_right_pil=image_processor.postprocess( vae.decode(predicted_right_output/scale,return_dict=False)[0])
+            actual_right_decoded=vae.decode(right_src/scale,return_dict=False)[0]
+            predicted_right_decoded=vae.decode(predicted_right_output/scale,return_dict=False)[0]
+            actual_right_pil=image_processor.postprocess(actual_right_decoded )
+            predicted_right_pil=image_processor.postprocess( predicted_right_decoded)
             for n,fake in enumerate(predicted_right_pil):
                 real=actual_right_pil[n]
                 concat=concat_images_horizontally([real,fake])
@@ -377,16 +392,56 @@ def main(args):
                     f"test_{count+n}":wandb.Image(concat)
                 })
             if args.task in [FASHION,FASHION_SEG]:
-                ssim_score=ssim_metric(predicted_right_output/scale,right_src/scale)
-                psnr_score=psnr_metric(predicted_right_output/scale,right_src/scale)
-                lpips_score=lpips_metric(predicted_right_output/scale,right_src/scale)
+                predicted_right_decoded=torch.clamp(predicted_right_decoded,-1,1)
+                actual_right_decoded=torch.clamp(actual_right_decoded,-1,1)
+                ssim_score=ssim_metric(predicted_right_decoded,actual_right_decoded)
+                psnr_score=psnr_metric(predicted_right_decoded,actual_right_decoded)
+                lpips_score=lpips_metric(predicted_right_decoded,actual_right_decoded)
                 
                 for name,score in zip(["ssim","psnr","lpips"],[ssim_score,psnr_score,lpips_score]):
                     test_metric_dict[name].append(score.cpu().detach().numpy())
                 
                 for m in [fid_metric,kid_metric]:
-                    m.update(normalize(right_src/scale),real=True)
-                    m.update(normalize(predicted_right_output/scale),real=False)
+                    m.update(normalize(actual_right_decoded),real=True)
+                    m.update(normalize(predicted_right_decoded),real=False)
+            if args.task in [T2I]:
+                clip_text_inputs=clip_processor(
+                    text=batch["text"],
+                    return_tensors="pt",
+                    padding=True
+                ).to(device)
+                
+                text_features = clip_model.get_text_features(**clip_text_inputs).pooler_output
+                text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+                
+                clip_real_image_inputs=clip_processor(
+                    images=actual_right_pil,
+                    return_tensors="pt",
+                    padding=True
+                ).to(device)
+                real_clip_image_features = clip_model.get_image_features(**clip_real_image_inputs).pooler_output
+
+                # Optional: normalize
+                real_clip_image_features = real_clip_image_features / real_clip_image_features.norm(dim=-1, keepdim=True)
+                
+                clip_predicted_image_inputs=clip_processor(
+                    images=predicted_right_pil,
+                    return_tensors="pt",
+                    padding=True
+                ).to(device)
+                predicted_clip_image_features = clip_model.get_image_features(**clip_predicted_image_inputs).pooler_output
+
+                # Optional: normalize
+                predicted_clip_image_features = predicted_clip_image_features / predicted_clip_image_features.norm(dim=-1, keepdim=True)
+                
+                text_similarity = predicted_clip_image_features @ text_features.T   # (B, B)
+                image_similarity=predicted_clip_image_features @ real_clip_image_features.T
+                
+                for q in range(text_similarity.size()[0]):
+                    test_metric_dict["clip_i"].append(image_similarity[q][q].cpu().detach().numpy())
+                    test_metric_dict["clip_t"].append(text_similarity[q][q].cpu().detach().numpy())
+                                
+                
                 
         
         return loss.cpu().detach().numpy()
@@ -394,7 +449,13 @@ def main(args):
     batch_function()
     if args.task in [FASHION,FASHION_SEG]:
         test_metric_dict["fid"].append(fid_metric.compute().cpu().detach().numpy())
-        test_metric_dict["kid"].append(kid_metric.compute().cpu().detach().numpy())
+        try:
+            test_metric_dict["kid"].append(kid_metric.compute().cpu().detach().numpy())
+        except ValueError: #for testing code
+            for _ in range(50):
+                kid_metric.update([torch.zeros((3,args.height,args.width),dtype=torch.uint8)],True)
+                kid_metric.update([torch.zeros((3,args.height,args.width),dtype=torch.uint8)],False)
+            
         
     test_metric_dict={k:v for k,v in test_metric_dict.items() if len(v)>0}
     

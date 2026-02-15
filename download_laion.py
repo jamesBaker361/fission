@@ -44,7 +44,7 @@ with open(found_file_path,"a") as found_file:
             text=row["llava_caption"]
             if image_url not in found_set:
                 image_path=os.path.join(root,f"image_{count}.jpg")
-                caption_file.write(f"{image_path},{image_url},{text}\n")
+                
                 #print(["wget","-O",image_path,image_url,])
                 #subprocess.run(["wget","-O",image_path,image_url,],capture_output=True)
                 safe_url = quote(image_url, safe=":/?=&%")
@@ -63,6 +63,7 @@ with open(found_file_path,"a") as found_file:
                 
                     
                     Image.open(image_url)
+                    caption_file.write(f"{image_path},{image_url},{text}\n")
 
                 except Exception as e:
                     print("FAILED:", image_url)

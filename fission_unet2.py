@@ -30,6 +30,8 @@ from diffusers.utils.peft_utils import scale_lora_layers, unscale_lora_layers
 UNET="unet"
 MID_BLOCK="mid_block"
 WEIGHT_SUFFIX="_weight_partial_unet.safetensors"
+WEIGHT_NAME="fission_unet.safetensors"
+CONFIG_NAME="weights_config.json"
 
 class PartialUNet2DConditionModel(MetadataUNet2DConditionModel):
     def forward_down(
@@ -464,9 +466,9 @@ class FissionUNet2DConditionModel(ModelMixin,MetadataMixin,ConfigMixin):
         
         return model
     
-    def __init__(self, n_inputs:int, 
-                 shared_layer_type:str,
-                 n_mid_blocks:int,
+    def __init__(self, n_inputs:int=2, 
+                 shared_layer_type:str=MID_BLOCK,
+                 n_mid_blocks:int=2,
                  use_metadata:bool=False,
                  num_metadata:int =1,
                  metadata_proj:bool=False,
@@ -565,8 +567,13 @@ class FissionUNet2DConditionModel(ModelMixin,MetadataMixin,ConfigMixin):
         self.n_inputs=n_inputs
         self.shared_layer_type=shared_layer_type
         self.cross_attention_dim=cross_attention_dim
+        self.n_mid_blocks=n_mid_blocks
         self.max_position_embeddings=max_position_embeddings
+        if tokenizer is None:
+            tokenizer=CLIPTokenizer.from_pretrained("SimianLuo/LCM_Dreamshaper_v7",subfolder="tokenizer")
         self.tokenizer=tokenizer
+        if text_model is None:
+            text_model=CLIPTextModel.from_pretrained("SimianLuo/LCM_Dreamshaper_v7",subfolder="text_encoder")
         self.text_model=text_model
         
         
@@ -664,7 +671,13 @@ class FissionUNet2DConditionModel(ModelMixin,MetadataMixin,ConfigMixin):
             )
             
     
-        
+    def register_to_config(self, **kwargs):
+        kwargs["n_inputs"]=self.n_inputs
+        kwargs["shared_layer_type"]=self.shared_layer_type
+        kwargs["n_mid_blocks"]=self.n_mid_blocks
+        super().register_to_config(**kwargs)
+            
+    
     def set_adapter(self,adapter_config:LoraConfig,adapter_name: str = "default"):
         for unet in self.partial_list:
             unet.add_adapter(adapter_config,adapter_name)
@@ -991,6 +1004,39 @@ class FissionUNet2DConditionModel(ModelMixin,MetadataMixin,ConfigMixin):
         
         return final_sample_list
         
+    def save_pretrained_custom(self,path):
+        os.makedirs(path,exist_ok=True)
+        weight_path=os.path.join(path,WEIGHT_NAME)
+        config_path=os.path.join(path,CONFIG_NAME)
+        torch.save(self.state_dict(),weight_path)
+        with open(config_path,"w+") as fp:
+            obj = {
+            'n_inputs': self.n_inputs,
+            'shared_layer_type': self.shared_layer_type,
+            'cross_attention_dim': self.cross_attention_dim,
+            'n_mid_blocks': self.n_mid_blocks,
+            'max_position_embeddings': self.max_position_embeddings,
+            #'timestep_input_dim': self.timestep_input_dim,
+            #'time_embed_dim': self.time_embed_dim,
+            }
+            json.dump(obj,fp)
+    
+    @classmethod
+    def from_pretrained_custom(cls,path):
+        weight_path=os.path.join(path,WEIGHT_NAME)
+        config_path=os.path.join(path,CONFIG_NAME)
+        with open(config_path,"r") as fp:
+            obj =json.load(fp)
+            
+        fission=cls(**obj)
+        fission.load_state_dict(torch.load(weight_path))
+        
+        return fission
+        
+        
+        
+        
+    
             
         
         

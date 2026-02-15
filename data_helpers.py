@@ -90,6 +90,9 @@ class ShapeNetImageDataPaired(Dataset):
                 pairs= list(itertools.combinations(value, 2))
                 #print("pairs",pairs)
                 self.index_pair_list+=pairs
+                
+        self.limit=limit
+        self.index_pair_list=self.index_pair_list[:limit]
     
     def __len__(self):
         return len(self.index_pair_list)
@@ -213,6 +216,41 @@ class TextImageWikiData(Dataset):
             
         }
         
+class LaionDataset(Dataset):
+    def __init__(self,dim:Tuple[int],limit:int=-1):
+        super().__init__()
+        self.dim=dim #(h,w)
+        self.image_processor=VaeImageProcessor()
+        self.tokenizer=CLIPTokenizer.from_pretrained("SimianLuo/LCM_Dreamshaper_v7",subfolder="tokenizer")
+        self.path_list=[]
+        self.caption_list=[]
+        self.limit=limit
+        with open(os.path.join("laion","captions.csv"),"rt") as file:
+            count=0
+            for r,row in enumerate(file.readlines()):
+                row=row.split(",")
+                if os.path.exists(row[0]):
+                    if count==limit:
+                        break
+                    count+=1
+                    self.path_list.append(row[0])
+                    self.caption_list.append(row[-1])
+                    
+                    
+        
+    def __len__(self):
+        return len(self.path_list)
+    
+    
+    def __getitem__(self, index):
+        return {
+            "image":self.image_processor.preprocess(Image.open(self.path_list[index]).convert("RGB").resize(self.dim))[0],
+            "text":self.caption_list[index],
+            "input_ids":self.tokenizer(self.caption_list[index],padding="max_length",max_length=self.tokenizer.model_max_length, return_tensors="pt",).input_ids,
+            
+            
+        }
+        
 class PersonaDataset(Dataset):
     def __init__(self,dim:Tuple[int],limit:int=-1):
         super().__init__()
@@ -222,13 +260,13 @@ class PersonaDataset(Dataset):
         with open(os.path.join("pcs_dataset","info.json"),"r") as file:
             info=json.load(file)
             
-        subject_with_cls=info["subject"]["subject_with_cls"] #dict
-        live_subjects=info["subject"]["live_subjects"]
-        prompt_object=info["subject"]["prompt_object"]
-        prompt_live=info["subject"]["prompt_live"]
+        subject_with_cls=info["subjects"]["subject_with_cls"] #dict
+        live_subjects=info["subjects"]["live_subjects"]
+        prompt_object=info["subjects"]["prompt_object"]
+        prompt_live=info["subjects"]["prompt_live"]
         
         id_with_gender=info["face"]["id_with_gender"] #dict
-        prompt_accesory=info["face"]["prompt_accesory"]
+        prompt_accesory=info["face"]["prompt_accessory"]
         prompt_context=info["face"]["prompt_context"]
         prompt_action=info["face"]["prompt_action"]
         prompt_style=info["face"]["prompt_style"]
@@ -272,7 +310,7 @@ class PersonaDataset(Dataset):
     def __getitem__(self, index):
         text=self.caption_list[index]
         return {
-             "image":self.image_processor.preprocess(Image.open(self.path_list[index]).convert("RGB").resize(self.dim))[0],
+             "image":self.image_processor.preprocess(Image.open(self.image_path_list[index]).convert("RGB").resize(self.dim))[0],
             "text":text,
             "input_ids":self.tokenizer(text,padding="max_length",max_length=self.tokenizer.model_max_length, return_tensors="pt",).input_ids,
             
@@ -284,21 +322,24 @@ class PersonaDataset(Dataset):
 
     
 if __name__=='__main__':
-    for dataset_class in [ShapeNetImageData,ShapeNetImageDataPaired]:
+    for dataset_class in [ShapeNetImageDataPaired]:
         data=dataset_class("shapenet_renders",dim=(64,64),limit=10) #shapenet renders is the big directory
         print(dataset_class,"len",len(data))
         for batch in data:
+            print(batch["image_0"].max(),batch["image_0"].min())
             break
     for dataset_class in [TextImageWikiData,VirtualTryOnData]:
         data=dataset_class("test",dim=(64,64),limit=10)
         print(dataset_class,"len",len(data))
         for batch in data:
+            print(batch["image"].max(),batch["image"].min())
             break
         
-    for dataset_class in [PersonaDataset]:
+    for dataset_class in [PersonaDataset,LaionDataset]:
         data=dataset_class(dim=(64,64),limit=10)
         print(dataset_class,"len",len(data))
         for batch in data:
+            print(batch["image"].max(),batch["image"].min())
             break
         
     

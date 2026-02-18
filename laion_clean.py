@@ -3,7 +3,7 @@ from PIL import Image
 
 
 with open(os.path.join("laion","captions.csv"),"rt") as file:
-    with open(os.path.join("laion","clean_captions.csv"),"wt") as caption_file:
+    with open(os.path.join("laion","clean_captions.csv"),"w") as caption_file:
         for r,row in enumerate(file.readlines()):
             row=row.split(",")
             if os.path.exists(row[0]):

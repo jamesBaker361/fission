@@ -154,7 +154,11 @@ def main(args):
             LoraConfig(r=args.rank,
                 lora_alpha=4,
                 init_lora_weights="gaussian",
-                target_modules=["to_k", "to_q", "to_v", "to_out.0"],)
+                target_modules=["to_k", "to_q", "to_v", "to_out.0"],),
+            LoraConfig(r=args.rank,
+                lora_alpha=4,
+                init_lora_weights="gaussian",
+                target_modules=["conv0", "conv1"])
         )
         
     params=[p for p in fission.parameters() if p.requires_grad]
@@ -173,7 +177,7 @@ def main(args):
     image_processor=VaeImageProcessor()
     
     #data
-    dim=(args.height,args.width)
+    dim=(args.width,args.height)
     generator=torch.Generator()
     generator.manual_seed(123)
     if args.task in (FASHION,FASHION_SEG):
@@ -211,7 +215,10 @@ def main(args):
     
     def save(epoch:int):
         if  not args.dont_save:
-            fission.save_pretrained_custom(save_path)
+            if args.use_lora:
+                fission.save_lora_adapter(save_path)
+            else:
+                fission.save_pretrained_custom(save_path)
             config_dict["train"]["start_epoch"]=epoch
             with open(config_path,"w") as config_file:
                 json.dump(config_dict,config_file, indent=4)
@@ -225,8 +232,12 @@ def main(args):
             
         if "train" in data and "start_epoch" in data["train"]:
             start_epoch = data["train"]["start_epoch"]
-    if len(os.listdir(save_path))!=0:
-        fission=FissionUNet2DConditionModel.from_pretrained_custom(save_path)
+        if args.use_lora:
+            fission.load_lora_adapter(save_path)
+            
+        else:
+            fission=FissionUNet2DConditionModel.from_pretrained_custom(save_path)
+        print("loaded from ",save_path)
 
     
     ssim_metric=StructuralSimilarityIndexMeasure(data_range=(-1.0,1.0)).to(device)
@@ -403,7 +414,7 @@ def main(args):
                 
                 for m in [fid_metric,kid_metric]:
                     m.update(normalize(actual_right_decoded),real=True)
-                    m.update(normalize(predicted_right_decoded),real=False)
+                    m.update(normalize(predicted_right_decoded.to(torch.uint8)),real=False)
             if args.task in [T2I]:
                 clip_text_inputs=clip_processor(
                     text=batch["text"],
@@ -450,11 +461,13 @@ def main(args):
     if args.task in [FASHION,FASHION_SEG]:
         test_metric_dict["fid"].append(fid_metric.compute().cpu().detach().numpy())
         try:
-            test_metric_dict["kid"].append(kid_metric.compute().cpu().detach().numpy())
+            test_metric_dict["kid"].append(kid_metric[0].compute().cpu().detach().numpy())
         except ValueError: #for testing code
+            pass
             for _ in range(50):
-                kid_metric.update([torch.zeros((3,args.height,args.width),dtype=torch.uint8)],True)
-                kid_metric.update([torch.zeros((3,args.height,args.width),dtype=torch.uint8)],False)
+                kid_metric.update(torch.zeros((args.batch_size,3,args.width,args.height),dtype=torch.uint8,device=device),True)
+                kid_metric.update(torch.zeros((args.batch_size,3,args.width,args.height),dtype=torch.uint8,device=device),False)
+            test_metric_dict["kid"].append(kid_metric[0].compute().cpu().detach().numpy())
             
         
     test_metric_dict={k:v for k,v in test_metric_dict.items() if len(v)>0}

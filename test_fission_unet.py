@@ -247,7 +247,11 @@ class TestFission(unittest.TestCase):
                     lora_alpha=4,
                     init_lora_weights="gaussian",
                     target_modules=["to_k", "to_q", "to_v", "to_out.0"],)
-        fission.set_adapter(config)
+        shared_config=LoraConfig(r=4,
+                    lora_alpha=4,
+                    init_lora_weights="gaussian",
+                    target_modules=["conv0", "conv1"],)
+        fission.set_adapter(config,shared_config)
         
         device,dtype=fission.get_device_dtype()
         
@@ -350,6 +354,91 @@ class TestFission(unittest.TestCase):
         
         loss.backward()
         optimizer.step()
+        
+    def train_and_load_lora(self):
+        # sbatch --err=slurm_chip/unit/train_and_load_lora.err --out=slurm_chip/unit/train_and_load_lora.out runpycpu_chip.sh test_fission_unet.py TestFission.train_and_load_lora
+        
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        n_inputs=2
+        batch_size=2
+        dim=4
+        shared_layer_type =MID_BLOCK
+        fission=FissionUNet2DConditionModel(n_inputs,shared_layer_type,2).to(device)
+        device,dtype=fission.get_device_dtype()
+        
+        fission.requires_grad_(False)
+        '''for partial in fission.partial_list:
+            self.assertFalse(partial.requires_grad)'''
+            
+        
+        config=LoraConfig(r=4,
+                    lora_alpha=4,
+                    init_lora_weights="gaussian",
+                    target_modules=["to_k", "to_q", "to_v", "to_out.0"],)
+        shared_config=LoraConfig(r=4,
+                    lora_alpha=4,
+                    init_lora_weights="gaussian",
+                    target_modules=["conv2", "conv1"],)
+        fission.set_adapter(config,shared_config)
+        
+        device,dtype=fission.get_device_dtype()
+        
+        timestep_list=[torch.randn((batch_size)).to(device,dtype) for _ in range(n_inputs)]
+        optimizer=torch.optim.Adam([p for p in fission.parameters() if p.requires_grad],lr=0.1)
+        inputs=[torch.randn((batch_size,4,dim,dim)).to(device,dtype) for _ in range(n_inputs)]
+        targets=[torch.randn((batch_size,4,dim,dim)).to(device,dtype) for _ in range(n_inputs)]
+        
+        
+        
+        optimizer.zero_grad()
+        generated_outputs=fission.forward(inputs,timestep_list)
+        
+        loss = torch.stack([
+            F.mse_loss(i.float(), o.float())
+            for i, o in zip(targets, generated_outputs)
+        ]).mean()
+        
+        loss.backward()
+        optimizer.step()
+        
+        with torch.no_grad():
+            later_outputs=fission.forward(inputs,timestep_list)
+            
+        self.assertNotEqual(0, torch.sum(torch.stack(
+            [F.mse_loss(l.float(), o.float())
+            for l, o in zip(later_outputs, generated_outputs)]
+        ).mean()).cpu().detach().numpy().item())
+        
+        fission.save_lora_adapter("test_lora_dir_fission")
+        
+        fission.unload_lora()
+        device,dtype=fission.get_device_dtype()
+        
+        fission.requires_grad_(False)
+        '''for partial in fission.partial_list:
+            self.assertFalse(partial.requires_grad)'''
+            
+        
+        config=LoraConfig(r=4,
+                    lora_alpha=4,
+                    init_lora_weights="gaussian",
+                    target_modules=["to_k", "to_q", "to_v", "to_out.0"],)
+        shared_config=LoraConfig(r=4,
+                    lora_alpha=4,
+                    init_lora_weights="gaussian",
+                    target_modules=["conv0", "conv1"],)
+        
+        fission.load_lora_adapter("test_lora_dir_fission")
+        
+        with torch.no_grad():
+            latest_outputs=fission.forward(inputs,timestep_list)
+            
+        
+        self.assertEqual(0, torch.sum(torch.stack(
+            [F.mse_loss(l.float(), o.float())
+            for l, o in zip(later_outputs, latest_outputs)]
+        ).mean()).cpu().detach().numpy().item())
+        
         
     
         

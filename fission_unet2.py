@@ -1,7 +1,8 @@
-from diffusers.models.unets.unet_2d_blocks import get_down_block,get_mid_block,get_up_block,UpBlock2D,CrossAttnUpBlock2D,apply_freeu
+from diffusers.models.unets.unet_2d_blocks import get_down_block,get_mid_block,get_up_block,UpBlock2D,CrossAttnUpBlock2D,apply_freeu,UNetMidBlock2DCrossAttn,UNetMidBlock2D
 from diffusers import UNet2DConditionModel
 from diffusers.models.resnet import ResnetBlock2D
 from diffusers.models.activations import get_activation
+from diffusers.loaders import PeftAdapterMixin, UNet2DConditionLoadersMixin
 from experiment_helpers.metadata_unet import MetadataUNet2DConditionModel,WEIGHTS_PATH,JSON_PATH,MetadataMixin
 import torch
 from typing import Optional,List,Tuple,Dict,Any,Union
@@ -27,11 +28,111 @@ import os
 from diffusers.utils.constants import USE_PEFT_BACKEND
 from diffusers.utils.peft_utils import scale_lora_layers, unscale_lora_layers
 
+from diffusers.models.activations import ACT2CLS
+
+ACT2CLS_INVERTED={
+    v:k for k,v in ACT2CLS.items()
+}
+
 UNET="unet"
 MID_BLOCK="mid_block"
-WEIGHT_SUFFIX="_weight_partial_unet.safetensors"
+LORA_WEIGHT_SUFFIX="_weight_partial_unet.safetensors"
 WEIGHT_NAME="fission_unet.safetensors"
+LORA_SHARED_WEIGHT_SUFFIX="_shared_blocks.safetensors"
 CONFIG_NAME="weights_config.json"
+
+class ResnetBlock2DPeft(ResnetBlock2D,PeftAdapterMixin):
+    def __init__(self, *, in_channels, out_channels = None, conv_shortcut = False, dropout = 0, temb_channels = 512, groups = 32, groups_out = None, pre_norm = True, eps = 0.000001, non_linearity = "swish", skip_time_act = False, time_embedding_norm = "default", kernel = None, output_scale_factor = 1, use_in_shortcut = None, up = False, down = False, conv_shortcut_bias = True, conv_2d_out_channels = None):
+        ResnetBlock2D.__init__(self,in_channels=in_channels, out_channels=out_channels, conv_shortcut=conv_shortcut, dropout=dropout, temb_channels=temb_channels, groups=groups, groups_out=groups_out, pre_norm=pre_norm, eps=eps, non_linearity=non_linearity, skip_time_act=skip_time_act, time_embedding_norm=time_embedding_norm, kernel=kernel, output_scale_factor=output_scale_factor, use_in_shortcut=use_in_shortcut, up=up, down=down, conv_shortcut_bias=conv_shortcut_bias, conv_2d_out_channels=conv_2d_out_channels)
+        PeftAdapterMixin.__init__(self)
+        
+def convert_resnet_to_peft(old_block):
+    new_block = ResnetBlock2DPeft(
+        in_channels=old_block.in_channels,
+        out_channels=old_block.out_channels,
+        temb_channels=old_block.time_emb_proj.in_features,
+        groups=old_block.norm1.num_groups,
+        eps=old_block.norm1.eps,
+        non_linearity=ACT2CLS_INVERTED[old_block.nonlinearity.__class__],
+        output_scale_factor=old_block.output_scale_factor,
+        time_embedding_norm=old_block.time_embedding_norm,
+        use_in_shortcut=old_block.use_in_shortcut,
+    )
+
+    new_block.load_state_dict(old_block.state_dict())
+    return new_block
+
+        
+
+class UNetMidBlock2DCrossAttnPeft(UNetMidBlock2DCrossAttn,PeftAdapterMixin):
+    def __init__(self, in_channels, temb_channels, out_channels = None, dropout = 0, num_layers = 1, transformer_layers_per_block = 1, resnet_eps = 0.000001, resnet_time_scale_shift = "default", resnet_act_fn = "swish", resnet_groups = 32, resnet_groups_out = None, resnet_pre_norm = True, num_attention_heads = 1, output_scale_factor = 1, cross_attention_dim = 1280, dual_cross_attention = False, use_linear_projection = False, upcast_attention = False, attention_type = "default"):
+        super().__init__(in_channels, temb_channels, out_channels, dropout, num_layers, transformer_layers_per_block, resnet_eps, resnet_time_scale_shift, resnet_act_fn, resnet_groups, resnet_groups_out, resnet_pre_norm, num_attention_heads, output_scale_factor, cross_attention_dim, dual_cross_attention, use_linear_projection, upcast_attention, attention_type)
+        for r in range(len(self.resnets)):
+            self.resnets[r]=convert_resnet_to_peft(self.resnets[r])
+        
+class UNetMidBlock2DPeft(UNetMidBlock2D,PeftAdapterMixin):
+    def __init__(self, in_channels, temb_channels, dropout = 0, num_layers = 1, resnet_eps = 0.000001, resnet_time_scale_shift = "default", resnet_act_fn = "swish", resnet_groups = 32, attn_groups = None, resnet_pre_norm = True, add_attention = True, attention_head_dim = 1, output_scale_factor = 1):
+        super().__init__(in_channels, temb_channels, dropout, num_layers, resnet_eps, resnet_time_scale_shift, resnet_act_fn, resnet_groups, attn_groups, resnet_pre_norm, add_attention, attention_head_dim, output_scale_factor)
+        for r in range(len(self.resnets)):
+            self.resnets[r]=convert_resnet_to_peft(self.resnets[r])
+
+def get_mid_block(
+    mid_block_type: str,
+    temb_channels: int,
+    in_channels: int,
+    resnet_eps: float,
+    resnet_act_fn: str,
+    resnet_groups: int,
+    output_scale_factor: float = 1.0,
+    transformer_layers_per_block: int = 1,
+    num_attention_heads: Optional[int] = None,
+    cross_attention_dim: Optional[int] = None,
+    dual_cross_attention: bool = False,
+    use_linear_projection: bool = False,
+    mid_block_only_cross_attention: bool = False,
+    upcast_attention: bool = False,
+    resnet_time_scale_shift: str = "default",
+    attention_type: str = "default",
+    resnet_skip_time_act: bool = False,
+    cross_attention_norm: Optional[str] = None,
+    attention_head_dim: Optional[int] = 1,
+    dropout: float = 0.0,
+):
+    if mid_block_type == "UNetMidBlock2DCrossAttn":
+        return UNetMidBlock2DCrossAttnPeft(
+            transformer_layers_per_block=transformer_layers_per_block,
+            in_channels=in_channels,
+            temb_channels=temb_channels,
+            dropout=dropout,
+            resnet_eps=resnet_eps,
+            resnet_act_fn=resnet_act_fn,
+            output_scale_factor=output_scale_factor,
+            resnet_time_scale_shift=resnet_time_scale_shift,
+            cross_attention_dim=cross_attention_dim,
+            num_attention_heads=num_attention_heads,
+            resnet_groups=resnet_groups,
+            dual_cross_attention=dual_cross_attention,
+            use_linear_projection=use_linear_projection,
+            upcast_attention=upcast_attention,
+            attention_type=attention_type,
+        )
+    elif mid_block_type == "UNetMidBlock2D":
+        return UNetMidBlock2DPeft(
+            in_channels=in_channels,
+            temb_channels=temb_channels,
+            dropout=dropout,
+            num_layers=0,
+            resnet_eps=resnet_eps,
+            resnet_act_fn=resnet_act_fn,
+            output_scale_factor=output_scale_factor,
+            resnet_groups=resnet_groups,
+            resnet_time_scale_shift=resnet_time_scale_shift,
+            add_attention=False,
+        )
+    elif mid_block_type is None:
+        return None
+    else:
+        raise ValueError(f"unknown mid_block_type : {mid_block_type}")
 
 class PartialUNet2DConditionModel(MetadataUNet2DConditionModel):
     def forward_down(
@@ -599,6 +700,7 @@ class FissionUNet2DConditionModel(ModelMixin,MetadataMixin,ConfigMixin):
         )
         
         self.init_metadata(use_metadata,num_metadata,metadata_proj,metadata_proj_dim)
+        self.using_lora=False
         
         if shared_layer_type==UNET:
             self.shared_blocks=PartialUNet2DConditionModel(sample_size=sample_size,
@@ -670,17 +772,39 @@ class FissionUNet2DConditionModel(ModelMixin,MetadataMixin,ConfigMixin):
                                ) for _ in range(n_mid_blocks)] 
             )
             
+    def shared_lora_layers(self):
+        modules=[]
+        for mid_block in self.shared_blocks:
+            if hasattr(mid_block,"attentions"):
+                for attn in mid_block.attentions:
+                    modules.append(attn)
+            if hasattr(mid_block,"resnets"):
+                for res in mid_block.resnets:
+                    modules.append(res)
+        
+        return modules
+            
     
     def register_to_config(self, **kwargs):
         kwargs["n_inputs"]=self.n_inputs
         kwargs["shared_layer_type"]=self.shared_layer_type
         kwargs["n_mid_blocks"]=self.n_mid_blocks
         super().register_to_config(**kwargs)
-            
+        
+    def get_resnets(self):
+        modules=[]
+        for block in self.shared_blocks:
+            for res in block.resnets:
+                modules.append(res)
+        return modules
     
-    def set_adapter(self,adapter_config:LoraConfig,adapter_name: str = "default"):
+    def set_adapter(self,adapter_config:LoraConfig,shared_adapter_config:LoraConfig,adapter_name: str = "default"):
         for unet in self.partial_list:
             unet.add_adapter(adapter_config,adapter_name)
+        for block in self.get_resnets():
+            #print(type(block),[m[0] for m in block.named_modules()])
+            block.add_adapter(shared_adapter_config,adapter_name)
+        
             
     def save_lora_adapter(
         self,
@@ -688,20 +812,31 @@ class FissionUNet2DConditionModel(ModelMixin,MetadataMixin,ConfigMixin):
         adapter_name: str = "default",
         upcast_before_saving: bool = False,
         safe_serialization: bool = True,
-        weight_name: Optional[str] = WEIGHT_SUFFIX,
+        weight_name: Optional[str] = LORA_WEIGHT_SUFFIX,
+        shared_weight_name: Optional[str]=LORA_SHARED_WEIGHT_SUFFIX,
     ):
         for u,unet in enumerate(self.partial_list):
             unet.save_lora_adapter(
                 save_directory,adapter_name,upcast_before_saving,safe_serialization,f"{u}{weight_name}"
             )
+        for m,block in enumerate(self.get_resnets()):
+            block.save_lora_adapter(
+                save_directory,adapter_name,upcast_before_saving,safe_serialization,f"{m}{shared_weight_name}"
+            )
             
-    def load_lora_adapter(self, pretrained_model_name_or_path_or_dict, prefix=None, hotswap: bool = False, weight_name=WEIGHT_SUFFIX,**kwargs):
+    def load_lora_adapter(self, pretrained_model_name_or_path_or_dict, prefix=None, hotswap: bool = False, 
+                          weight_name=LORA_WEIGHT_SUFFIX,shared_weight_name: Optional[str]=LORA_SHARED_WEIGHT_SUFFIX,**kwargs):
         for u,unet in enumerate(self.partial_list):
             unet.load_lora_adapter(pretrained_model_name_or_path_or_dict,prefix,hotswap,weight_name=f"{u}{weight_name}",**kwargs)
+        for m,block in enumerate(self.get_resnets()):
+            block.load_lora_adapter(pretrained_model_name_or_path_or_dict,prefix,hotswap,weight_name=f"{m}{shared_weight_name}",**kwargs)
             
     def unload_lora(self):
         for unet in self.partial_list:
             unet.unload_lora()
+        for block in self.get_resnets():
+            block.unload_lora()
+        
         
     def _set_time_proj(
         self,

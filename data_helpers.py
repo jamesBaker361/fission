@@ -3,7 +3,8 @@ import os
 import csv
 from diffusers.image_processor import VaeImageProcessor
 from transformers import CLIPTokenizer
-from PIL import Image
+from PIL import Image,UnidentifiedImageError
+from torch.utils.data import DataLoader
 import itertools
 from typing import Tuple
 import kagglehub
@@ -11,6 +12,12 @@ import torchvision.transforms as T
 import csv
 import torch
 import json
+from torch.utils.data.dataloader import default_collate
+
+def collate_skip_none(batch):
+    batch = [b for b in batch if b is not None]
+    return default_collate(batch)
+
 
 
 
@@ -158,7 +165,7 @@ class VirtualTryOnData(Dataset):
                 
         self.transforms=T.Compose([
             T.ColorJitter(),
-            T.RandomInvert()
+            T.RandomInvert(0.1)
         ])
                 
     def __len__(self):
@@ -225,7 +232,7 @@ class LaionDataset(Dataset):
         self.path_list=[]
         self.caption_list=[]
         self.limit=limit
-        with open(os.path.join("laion","captions.csv"),"rt") as file:
+        with open(os.path.join("laion","clean_captions.csv"),"rt") as file:
             count=0
             for r,row in enumerate(file.readlines()):
                 row=row.split(",")
@@ -235,6 +242,7 @@ class LaionDataset(Dataset):
                     count+=1
                     self.path_list.append(row[0])
                     self.caption_list.append(row[-1])
+
                     
                     
         
@@ -243,13 +251,16 @@ class LaionDataset(Dataset):
     
     
     def __getitem__(self, index):
-        return {
-            "image":self.image_processor.preprocess(Image.open(self.path_list[index]).convert("RGB").resize(self.dim))[0],
-            "text":self.caption_list[index],
-            "input_ids":self.tokenizer(self.caption_list[index],padding="max_length",max_length=self.tokenizer.model_max_length, return_tensors="pt",).input_ids,
-            
-            
-        }
+        try:
+            return {
+                "image":self.image_processor.preprocess(Image.open(self.path_list[index]).convert("RGB").resize(self.dim))[0],
+                "text":self.caption_list[index],
+                "input_ids":self.tokenizer(self.caption_list[index],padding="max_length",max_length=self.tokenizer.model_max_length, return_tensors="pt",).input_ids,
+                "path":self.path_list[index]
+                
+            }
+        except:
+            return None
         
 class PersonaDataset(Dataset):
     def __init__(self,dim:Tuple[int],limit:int=-1):
@@ -322,26 +333,16 @@ class PersonaDataset(Dataset):
 
     
 if __name__=='__main__':
-    for dataset_class in [ShapeNetImageDataPaired]:
-        data=dataset_class("shapenet_renders",dim=(64,64),limit=10) #shapenet renders is the big directory
-        print(dataset_class,"len",len(data))
-        for batch in data:
-            print(batch["image_0"].max(),batch["image_0"].min())
-            break
-    for dataset_class in [TextImageWikiData,VirtualTryOnData]:
-        data=dataset_class("test",dim=(64,64),limit=10)
-        print(dataset_class,"len",len(data))
-        for batch in data:
-            print(batch["image"].max(),batch["image"].min())
-            break
-        
-    for dataset_class in [PersonaDataset,LaionDataset]:
-        data=dataset_class(dim=(64,64),limit=10)
-        print(dataset_class,"len",len(data))
-        for batch in data:
-            print(batch["image"].max(),batch["image"].min())
-            break
-        
+    count=0
+    bad=0
+    data=LaionDataset((32,32))
+    from torch.utils.data.dataloader import default_collate
+
+    def collate_skip_none(batch):
+        batch = [b for b in batch if b is not None]
+        return default_collate(batch)
     
+    data=DataLoader(data,1,collate_fn=collate_skip_none)
     
-    print(batch)
+    for batch in data:
+        pass

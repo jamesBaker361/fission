@@ -18,5 +18,11 @@ class DataTest(unittest.TestCase):
                 for batch in data:
                     break
                 
+    def test_laion(self):
+        data=LaionDataset((64,64))
+        count=0
+        for batch in data:
+            pass
+                
 if __name__=="__main__":
     unittest.main()

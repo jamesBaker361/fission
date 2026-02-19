@@ -243,8 +243,8 @@ def main(args):
     ssim_metric=StructuralSimilarityIndexMeasure(data_range=(-1.0,1.0)).to(device)
     psnr_metric=PeakSignalNoiseRatio(data_range=(-1.0,1.0)).to(device)
     lpips_metric=LearnedPerceptualImagePatchSimilarity(net_type='squeeze').to(device)
-    fid_metric=FrechetInceptionDistance(feature=64,normalize=False).to(device) #expects images in [0,255]
-    kid_metric = KernelInceptionDistance(subset_size=50).to(device)
+    fid_metric=FrechetInceptionDistance(feature=64,normalize=False) #expects images in [0,255]
+    kid_metric = KernelInceptionDistance(subset_size=50)
     clip_metric=CLIPScore(model_name_or_path="openai/clip-vit-base-patch16").to(device)
     clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
     clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
@@ -396,9 +396,13 @@ def main(args):
             predicted_right_decoded=vae.decode(predicted_right_output/scale,return_dict=False)[0]
             actual_right_pil=image_processor.postprocess(actual_right_decoded )
             predicted_right_pil=image_processor.postprocess( predicted_right_decoded)
+            
+            actual_left_decoded=vae.decode(left_src/scale,return_dict=False)[0]
+            actual_left_pil=image_processor.postprocess(actual_left_decoded )
             for n,fake in enumerate(predicted_right_pil):
                 real=actual_right_pil[n]
-                concat=concat_images_horizontally([real,fake])
+                left_real=actual_left_pil[n]
+                concat=concat_images_horizontally([left_real,real,fake])
                 accelerator.log({
                     f"test_{count+n}":wandb.Image(concat)
                 })
@@ -413,8 +417,8 @@ def main(args):
                     test_metric_dict[name].append(score.cpu().detach().numpy())
                 
                 for m in [fid_metric,kid_metric]:
-                    m.update(normalize(actual_right_decoded),real=True)
-                    m.update(normalize(predicted_right_decoded.to(torch.uint8)),real=False)
+                    m.update(normalize(actual_right_decoded).cpu(),real=True)
+                    m.update(normalize(predicted_right_decoded.to(torch.uint8).cpu()),real=False)
             if args.task in [T2I]:
                 clip_text_inputs=clip_processor(
                     text=batch["text"],

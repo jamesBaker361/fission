@@ -59,6 +59,7 @@ class ShapeNetImageData(Dataset):
         return output
     
 class ShapeNetImageDataPaired(Dataset):
+    #since we dont know the partition we're gonna just have to do it randomly sorry
     def __init__(self,render_dir:str,dim:Tuple[int],limit:int=-1,partition:str="training",test_frac=0.1):
         super().__init__()
         self.render_dir=render_dir

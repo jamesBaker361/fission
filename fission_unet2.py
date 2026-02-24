@@ -805,6 +805,7 @@ class FissionUNet2DConditionModel(ModelMixin,MetadataMixin,ConfigMixin):
             #print(type(block),[m[0] for m in block.named_modules()])
             block.add_adapter(shared_adapter_config,adapter_name)
         
+        
             
     def save_lora_adapter(
         self,

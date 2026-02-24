@@ -4,7 +4,7 @@ from experiment_helpers.gpu_details import print_details
 from fission_unet2 import FissionUNet2DConditionModel,MID_BLOCK
 from peft import LoraConfig
 from diffusers import AutoencoderKL
-from data_helpers import VirtualTryOnData,TextImageWikiData,ShapeNetImageDataPaired,LaionDataset,PersonaDataset
+from data_helpers import VirtualTryOnData,TextImageWikiData,ShapeNetImageDataPaired,LaionDataset,PersonaDataset,SBUDataset
 from torch.utils.data import random_split
 from experiment_helpers.loop_decorator import optimization_loop
 from experiment_helpers.saving_helpers import CONFIG_NAME
@@ -81,11 +81,13 @@ def inference(args:ArgumentParser,
               shared_encoder_hidden_states:torch.Tensor=None,
               encoder_hidden_states_list:List[torch.Tensor]=None,
               partial_metadata_list:List[torch.Tensor]=None,
+              right_input: torch.Tensor=None,
             )->torch.Tensor:
     
     batch_size=left_input.size()[0]
     left_timesteps=torch.tensor([1 for _ in range(batch_size)],device=device).long()
-    right_input=torch.randn_like(left_input,device=device)
+    if right_input is None:
+        right_input=torch.randn_like(left_input,device=device)
     zero_list=[]
     if args.zero_inference:
         zero_list=[1]
@@ -185,7 +187,7 @@ def main(args):
         val_dataset,train_dataset=random_split(train_dataset,[0.1,0.9])
         test_dataset=VirtualTryOnData("test",dim,args.limit)
     elif args.task ==T2I:
-        train_dataset=LaionDataset(dim,args.limit)
+        train_dataset=SBUDataset(dim,args.limit)
         val_dataset,train_dataset=random_split(train_dataset,[0.1,0.9])
         test_dataset=PersonaDataset(dim,args.limit)
     elif args.task==THREE_D:
@@ -217,8 +219,10 @@ def main(args):
         if  not args.dont_save:
             if args.use_lora:
                 fission.save_lora_adapter(save_path)
+                fission.save_metadata_embedding(save_path)
             else:
                 fission.save_pretrained_custom(save_path)
+                fission.save_metadata_embedding(save_path)
             config_dict["train"]["start_epoch"]=epoch
             with open(config_path,"w") as config_file:
                 json.dump(config_dict,config_file, indent=4)
@@ -234,7 +238,7 @@ def main(args):
             start_epoch = data["train"]["start_epoch"]
         if args.use_lora:
             fission.load_lora_adapter(save_path)
-            
+            fission.load_metadata_embedding(save_path)
         else:
             fission=FissionUNet2DConditionModel.from_pretrained_custom(save_path)
         print("loaded from ",save_path)
@@ -293,10 +297,7 @@ def main(args):
             partial_metadata_list=[left_metadata,right_metadata]
         elif args.task==FASHION:
             left_src=batch["cloth"]
-            right_src=batch["agnostic"]
-        elif args.task ==FASHION_SEG:
-            left_src=batch["cloth"]
-            right_src=batch["segmentation"]
+            right_src=batch["image"]
         elif args.task==T2I:
             left_src=batch["image"]
             right_src=left_src.clone()
@@ -328,6 +329,12 @@ def main(args):
                 
             left_noise=torch.randn_like(left_src,device=device)
             right_noise=torch.randn_like(right_src,device=device)
+            
+            if args.task==FASHION:
+                right_agnostic=batch["agnostic"].to(device)
+                right_agnostic=scale*vae.encode(right_agnostic).latent_dist.sample()
+                right_noise=right_agnostic
+                
             
             left_input=scheduler.add_noise(left_src,left_noise,left_timesteps)
             #print("elft input",left_input.size())
@@ -374,8 +381,14 @@ def main(args):
                             ]).mean()
                     
                     if count <args.val_inference_limit:
+                        if args.task==FASHION:
+                            right_agnostic=batch["agnostic"].to(device)
+                            right_agnostic=scale*vae.encode(right_agnostic).latent_dist.sample()
+                            right_input=right_agnostic
+                        else:
+                            right_input=None
                         predicted_right_output=inference(args,fission,scheduler,left_src,device,
-                                             shared_encoder_hidden_states,encoder_hidden_states_list,partial_metadata_list)
+                                             shared_encoder_hidden_states,encoder_hidden_states_list,partial_metadata_list,right_input)
                         actual_right_pil=image_processor.postprocess( vae.decode(right_src/scale,return_dict=False)[0])
                         predicted_right_pil=image_processor.postprocess( vae.decode(predicted_right_output/scale,return_dict=False)[0])
                         for n,fake in enumerate(predicted_right_pil):
@@ -388,8 +401,14 @@ def main(args):
                 
             
         else:
+            if args.task==FASHION:
+                right_agnostic=batch["agnostic"].to(device)
+                right_agnostic=scale*vae.encode(right_agnostic).latent_dist.sample()
+                right_input=right_agnostic
+            else:
+                right_input=None
             predicted_right_output=inference(args,fission,scheduler,left_src,device,
-                                             shared_encoder_hidden_states,encoder_hidden_states_list,partial_metadata_list)
+                                             shared_encoder_hidden_states,encoder_hidden_states_list,partial_metadata_list,right_input)
             loss=F.mse_loss(predicted_right_output,right_src).mean()
             count=misc_dict["b"]*args.batch_size
             actual_right_decoded=vae.decode(right_src/scale,return_dict=False)[0]

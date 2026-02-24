@@ -13,6 +13,8 @@ import csv
 import torch
 import json
 from torch.utils.data.dataloader import default_collate
+from datasets import load_dataset
+import datasets
 
 def collate_skip_none(batch):
     batch = [b for b in batch if b is not None]
@@ -263,6 +265,33 @@ class LaionDataset(Dataset):
         except:
             return None
         
+        
+class SBUDataset(Dataset):
+    def __init__(self,dim:Tuple[int],limit:int=-1):
+        super().__init__()
+        self.dim=dim #(h,w)
+        self.image_processor=VaeImageProcessor()
+        self.tokenizer=CLIPTokenizer.from_pretrained("SimianLuo/LCM_Dreamshaper_v7",subfolder="tokenizer")
+        self.path_list=[]
+        self.caption_list=[]
+        self.limit=limit
+        self.data=load_dataset("Fhrozen/sbucaptions",split="train").cast_column("image",datasets.Image())
+        
+    def __len__(self):
+        return len(self.data)
+    
+    
+    def __getitem__(self, index):
+        row=self.data[index]
+        image=row["image"].convert("RGB").resize(self.dim)
+        caption=row["caption"]
+        return {
+            "image":self.image_processor.preprocess(image)[0],
+            "text":caption,
+            "input_ids":self.tokenizer(caption,padding="max_length",max_length=self.tokenizer.model_max_length, return_tensors="pt",).input_ids,
+        }
+        
+        
 class PersonaDataset(Dataset):
     def __init__(self,dim:Tuple[int],limit:int=-1):
         super().__init__()
@@ -336,14 +365,7 @@ class PersonaDataset(Dataset):
 if __name__=='__main__':
     count=0
     bad=0
-    data=LaionDataset((32,32))
-    from torch.utils.data.dataloader import default_collate
-
-    def collate_skip_none(batch):
-        batch = [b for b in batch if b is not None]
-        return default_collate(batch)
-    
-    data=DataLoader(data,1,collate_fn=collate_skip_none)
+    data=SBUDataset((32,32),)
     
     for batch in data:
         pass
